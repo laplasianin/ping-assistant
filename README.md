@@ -1,76 +1,126 @@
 # Ping Assistant
 
-Bun/TypeScript MCP channel server for Claude Code: watches Slack, pushes items into a
-session via `notifications/claude/channel`, talks to the user through a Telegram bot.
-Design: `docs/superpowers/specs/2026-10-19-ping-assistant-design.md`.
+Bun/TypeScript MCP channel server для Claude Code: читает Slack, подкладывает айтемы в
+сессию через `notifications/claude/channel` и общается с пользователем через Telegram-бота.
+Дизайн: `docs/superpowers/specs/2026-10-19-ping-assistant-design.md`.
 
-## Setup
+## Установка
+
+### Что нужно
+
+- [bun](https://bun.sh) в `PATH` той оболочки, из которой запускается `claude`;
+- `caffeinate` (есть в macOS из коробки) — launcher не даёт Маку заснуть, пока сессия жива;
+- Claude Code с поддержкой `--channels`.
 
 ```bash
 bun install
-bunx tsc --noEmit
+bunx tsc --noEmit   # проверка типов
+bun test            # тесты (стабильно без шума в stderr)
 ```
 
-## Run a session with the local plugin
+### Slack-приложение
+
+1. На https://api.slack.com/apps → *Create New App* → *From scratch*, выбрать воркспейс.
+2. *OAuth & Permissions* → **User Token Scopes** (именно user, не bot):
+   `channels:history channels:read groups:history groups:read im:history im:read mpim:history mpim:read users:read search:read chat:write files:read`
+3. *Install to Workspace* и подтвердить.
+4. Токен `xoxp-…` лежит там же, в *OAuth & Permissions* → **User OAuth Token**.
+   Сообщения уходят от твоего имени, без бейджа приложения.
+
+### Telegram-бот
+
+1. В @BotFather: `/newbot`, выбрать имя, скопировать токен вида `123456:ABC…`.
+2. Числовой chat id (это `telegramChatId`; бот отвечает только в личке с этим id):
+   - написать любое сообщение своему боту и открыть
+     `https://api.telegram.org/bot<TOKEN>/getUpdates` — id в `message.chat.id`; или
+   - спросить у @userinfobot.
+
+### Секреты
+
+`~/.config/ping-assistant/.env` (права `600`, в репозиторий не попадает):
+
+```
+SLACK_USER_TOKEN=xoxp-…
+TELEGRAM_BOT_TOKEN=123456:…
+```
+
+Те же переменные из окружения имеют приоритет над файлом.
+
+### Конфиг
 
 ```bash
-claude --plugin-dir . --channels plugin:ping-assistant@local
+cp ping-assistant.config.example.json ping-assistant.config.json
 ```
 
-`bun` must be on `PATH` of the shell that launches `claude`.
+Другой путь — переменная `PING_ASSISTANT_CONFIG`. Поля:
 
-## Channel protocol spike (Task 1, historical)
+| Поле | Смысл |
+|---|---|
+| `userId` | твой Slack member ID: профиль → ⋯ → *Copy member ID* |
+| `watchChannels` | ID каналов (`C…`), где отслеживаются треды; личка, группы-личек и упоминания читаются всегда |
+| `telegramChatId` | числовой chat id из шага выше, строкой |
+| `scentbirdRepoPath` | локальный клон репозитория; сессия читает из него код для разбора вопросов |
+| `pollSeconds` | период опроса Slack (60) |
+| `settleSeconds` | сколько ждать после последнего сообщения собеседника, прежде чем разбирать (90) |
+| `maxSettleSeconds` | потолок ожидания от первого сообщения (300) |
+| `followUpDays` | сколько дней после твоей отправки следить за тредом (7) |
+| `contextMessages` | сколько сообщений контекста подтягивать к айтему (30) |
+| `dryRun` | `true`: ничего не отправляется в Slack, в Telegram приходит «🧪 dry-run, отправил бы …» |
+| `statePath` | файл состояния (`~/.config/ping-assistant/state.json`) |
 
-The spike server has since been replaced by the real server, and `scripts/spike-check.ts`
-by `scripts/smoke-check.ts`; the findings below still hold.
+**Начинай с `"dryRun": true`.**
 
-Confirmed names: notification method `notifications/claude/channel`, capability
-`experimental['claude/channel']`, params `{ content, meta }`.
-The spike server (`src/main.ts`) exposes a `ping` tool (returns `pong`) and emits a
-`tick` notification every 20 s (`PING_TICK_MS` overrides).
+### voice.md
 
-Results:
-- Protocol level (`bun run scripts/spike-check.ts`): server advertises the capability,
-  `tools/list` returns `ping`, `ping` returns `pong`, and a `notifications/claude/channel`
-  tick (`content: "tick"`, `meta: {source: "ping-assistant", kind: "tick"}`) arrives.
-- `--channels plugin:ping-assistant` is rejected by the CLI ("entries must be tagged:
-  plugin:<name>@<marketplace>"). `plugin:ping-assistant@local` is accepted with `--plugin-dir .`.
-- Headless `claude -p` with the plugin loaded: the `ping` tool is reachable (the plugin
-  tool name is `mcp__plugin_ping-assistant_ping-assistant__ping`). Without an allow rule it
-  is denied by the permission prompt; with
-  `--allowedTools mcp__plugin_ping-assistant_ping-assistant__ping` the reply was `pong`.
-- NOT verified: the `<channel source="ping-assistant" ...>tick</channel>` message waking an
-  interactive session (needs a human terminal; `-p` mode ends after the turn). Check manually
-  once with the command above before relying on it; fallback is spec section 4
-  (`/loop 1m` + `next_items` tool).
+`voice.md` в корне проекта (раздел 7 спецификации) задаёт твой голос в ответах. Он
+готовится отдельно. Пока его нет, варианты нейтральные, а `analysis` заканчивается
+строкой «voice.md не найден».
+
+## Запуск
+
+```bash
+bin/ping-assistant-up
+```
+
+Это `caffeinate -i claude --plugin-dir . --channels plugin:ping-assistant@local`, запущенный
+из корня проекта; дополнительные аргументы пробрасываются в `claude`. Флаг `--channels`
+требует тег `plugin:<name>@<marketplace>`: голый `plugin:ping-assistant` CLI отклоняет.
+Первый тик (через `pollSeconds`) ставит курсоры на «сейчас», прошлое не разбирается.
+
+Логи: stderr сервера (Claude Code пишет его в логи MCP-сервера, видно с `claude --debug`).
+В них только виды событий, без текста сообщений. Состояние: `~/.config/ping-assistant/state.json`.
+
+Спросить сессию, что отсеяно: «что ты проигнорировал за сегодня?» (инструмент `list_ignored`,
+список с причинами); «что висит?» — `list_items`.
+
+## Команды в Telegram
+
+Айтемы нумеруются: `#14`, follow-up в том же треде — `#14.1`, `#14.2`.
+
+| Что написать | Что произойдёт |
+|---|---|
+| `14 2` | отправить вариант 2 в Slack как есть |
+| `14 2, но короче` | сессия правит вариант и показывает «финальный текст» с кнопками «Отправить/Отмена» |
+| `14: свой текст` | отправить свой текст |
+| `14 пропустить` | закрыть айтем без ответа |
+| `14 да` | подтвердить показанный финальный текст (или отправить, несмотря на предупреждение) |
+| `14 ещё` | любой другой текст пересылается сессии как просьба; «ещё» — запросить новые варианты |
+| ответ цитатой на сообщение бота | то же самое, номер айтема подставляется сам: «2», «2, но короче», «: свой текст» |
+| кнопки `1 2 3`, `Пропустить`, `Отправить`, `Отмена`, `Всё равно отправить` | то же, что команды выше |
+
+Текст без номера и без цитаты уходит сессии как обычный чат.
 
 ## Проверка dry-run
 
-В dry-run сервер делает всё, кроме отправки в Slack: вместо `chat.postMessage` в Telegram
-приходит «🧪 dry-run, отправил бы в <ссылка>: <текст>». Slack читается по-настоящему.
+Slack читается по-настоящему, отправки нет.
 
-1. **Slack-приложение.** На api.slack.com/apps создать приложение, в *OAuth & Permissions*
-   добавить **User Token Scopes**: `channels:history channels:read groups:history groups:read
-   im:history im:read mpim:history mpim:read users:read search:read chat:write files:read`,
-   установить в воркспейс, скопировать *User OAuth Token* (`xoxp-…`).
-2. **Telegram-бот.** В @BotFather `/newbot`, скопировать токен. Свой user ID узнать, например,
-   у @userinfobot; это `telegramChatId` (бот отвечает только в личке с этим ID).
-3. **Секреты** — `~/.config/ping-assistant/.env` (права `600`):
-   ```
-   SLACK_USER_TOKEN=xoxp-…
-   TELEGRAM_BOT_TOKEN=123456:…
-   ```
-4. **Конфиг.** `cp ping-assistant.config.example.json ping-assistant.config.json`, заполнить
-   `userId` (свой Slack ID: профиль → ⋯ → *Copy member ID*), `watchChannels`, `telegramChatId`,
-   `scentbirdRepoPath`, и поставить `"dryRun": true`. Другой путь к конфигу — переменная
-   `PING_ASSISTANT_CONFIG`.
-5. **Смоук без Claude.** `bun run scripts/smoke-check.ts` поднимает `src/main.ts` по stdio и
+1. Slack-приложение, бот, секреты и конфиг по инструкциям выше, `"dryRun": true`.
+2. **Смоук без Claude.** `bun run scripts/smoke-check.ts` поднимает `src/main.ts` по stdio и
    ожидает в выводе `started (dry-run)`, `claude/channel capability: yes`, список инструментов
    `propose, ignore, close, list_items, list_ignored, say` и `ok`. В Telegram смоук ничего не шлёт.
-6. **Сессия.** Из корня проекта: `claude --plugin-dir . --channels plugin:ping-assistant@local`.
-   Первый тик (через `pollSeconds`) ставит курсоры на «сейчас»: прошлое не разбирается.
-7. **Сценарий.** Попросить коллегу написать в личку два сообщения подряд. Ожидается:
-   - через `settleSeconds` (90 с) после последнего — **одно** сообщение в Telegram: шапка
+3. **Сессия.** `bin/ping-assistant-up`.
+4. **Сценарий.** Попросить коллегу написать в личку два сообщения подряд. Ожидается:
+   - через `settleSeconds` после последнего — **одно** сообщение в Telegram: шапка
      `#N · личка · Автор`, обе реплики, разбор, 2–3 варианта и кнопки `1 2 3 Пропустить`;
    - нажатие «1» → кнопки у айтема гаснут, в конце строка «✅ отправлен вариант 1», и приходит
      «🧪 dry-run, отправил бы в https://…slack.com/…: <текст варианта>»; в Slack ничего нет;
@@ -79,14 +129,42 @@ Results:
    - если коллега успел написать ещё что-то до нажатия — вместо отправки придёт «в треде
      появилось новое» с кнопками «Всё равно отправить/Отмена»;
    - ответ в Slack руками → айтем помечается «🙈 отвечено вручную».
-8. Логи — stderr сервера (Claude Code пишет его в логи MCP-сервера, видно с `claude --debug`); в них только виды событий,
-   без текста сообщений. Состояние — `~/.config/ping-assistant/state.json`.
 
-Когда сценарий прошёл, записать наблюдения в раздел «Проверено» ниже и выключить `dryRun`.
+## Первая боевая отправка
+
+Когда dry-run прошёл:
+
+1. В `ping-assistant.config.json` поставить `"dryRun": false`, перезапустить `bin/ping-assistant-up`.
+2. Дождаться реального вопроса (или попросить коллегу задать) и ответить на него кнопкой с вариантом.
+3. Ожидается: в Slack сообщение **от тебя, без бейджа приложения** (в треде, если вопрос был в
+   треде; в личке — обычным сообщением); в Telegram у айтема строка «✅ отправлен вариант N»
+   и отдельное сообщение «✅ отправлено: <ссылка>», ссылка открывает отправленное сообщение.
+4. Самоответ: на другой вопрос ответить руками в Slack. В Telegram у айтема должно появиться
+   «🙈 отвечено вручную», кнопки гаснут.
+5. Follow-up: если собеседник ответил в треде после твоей отправки, в течение `pollSeconds`
+   придёт новый айтем `#N.1` с полным контекстом треда. Слежение выключается через `followUpDays`.
+
+Если что-то пошло не так, вернуть `"dryRun": true`. Живой прогон с настоящими токенами ещё не
+делался, поэтому результаты записывать в раздел «Проверено» ниже.
 
 ## Проверено
 
-Пока ничего: живой прогон dry-run с настоящими токенами ещё не делался. Автоматически
-проверено (`bun test`, `test/orchestrator.test.ts`): весь поток от сбора до отправки на
-фейковых Slack и Telegram API и настоящем MCP-канале; смоук `scripts/smoke-check.ts`
-с фиктивными токенами проходит.
+Автоматически (`bun test`): весь поток от сбора до отправки на фейковых Slack и Telegram API и
+настоящем MCP-канале, включая follow-up в треде (`test/orchestrator.test.ts`) и истечение слежения
+(`test/collector.test.ts`); смоук `scripts/smoke-check.ts` с фиктивными токенами проходит.
+Вручную с настоящими токенами: пока ничего.
+
+## Протокол канала (спайк, Task 1)
+
+Спайк-сервер давно заменён настоящим, `scripts/spike-check.ts` — на `scripts/smoke-check.ts`;
+выводы ниже остаются в силе.
+
+- Метод уведомления `notifications/claude/channel`, capability `experimental['claude/channel']`,
+  params `{ content, meta }`.
+- `--channels plugin:ping-assistant` CLI отклоняет («entries must be tagged:
+  plugin:<name>@<marketplace>»); `plugin:ping-assistant@local` с `--plugin-dir .` принимается.
+- Имя инструмента плагина: `mcp__plugin_ping-assistant_ping-assistant__<tool>`. Без allow-правила
+  вызов упирается в запрос разрешения; нужные правила лежат в `.claude/settings.json`.
+- Не проверено автоматически: пробуждение интерактивной сессии сообщением
+  `<channel source="ping-assistant" …>` (нужен живой терминал). Запасной вариант — раздел 4
+  спецификации (`/loop 1m` + `next_items`).
