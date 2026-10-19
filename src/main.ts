@@ -6,6 +6,7 @@ import { loadConfig, loadSecrets } from './config'
 import { Orchestrator } from './orchestrator'
 import { SlackClient } from './slack/client'
 import { Collector } from './slack/collector'
+import { SlackSocket } from './slack/socket'
 import { StateStore } from './state'
 import { TelegramBot } from './telegram/bot'
 
@@ -19,18 +20,26 @@ const slack = new SlackClient(secrets.slackToken)
 // The collector gets its own client: its per-tick request budget must never block a send or a pre-send thread check.
 const collector = new Collector(new SlackClient(secrets.slackToken), cfg, state, join(dirname(cfg.statePath), 'files'))
 const tg = new TelegramBot(secrets.telegramToken, cfg.telegramChatId)
+// Socket Mode delivers messages within seconds; polling stays as reconciliation and as the fallback while it is down.
+const socket = secrets.slackAppToken
+  ? new SlackSocket(secrets.slackAppToken, { onEvent: (raw) => collector.enqueue(raw, raw.channelType) })
+  : undefined
+if (!socket) log('SLACK_APP_TOKEN not set, polling only')
 
 // The channel needs the orchestrator's handlers and the orchestrator needs channel.notify.
 let channel: Channel | undefined
 const orchestrator = new Orchestrator({
-  cfg, store, state, slack, collector, tg,
+  cfg, store, state, slack, collector, tg, socket,
   channel: { notify: (content, meta) => channel!.notify(content, meta) },
 })
 channel = new Channel(orchestrator.handlers())
 
 await channel.connect()
 orchestrator.start()
-log(`started${cfg.dryRun ? ' (dry-run)' : ''}, polling every ${cfg.pollSeconds}s`)
+socket?.start()
+log(`started${cfg.dryRun ? ' (dry-run)' : ''}, ${socket
+  ? `socket mode: draining every ${cfg.drainSeconds}s, polling every ${cfg.socketReconcileTicks} ticks while connected`
+  : `polling every ${cfg.pollSeconds}s`}`)
 if (cfg.dryRun && cfg.selfDmTest) log('selfDmTest ON (dry-run): own messages in the self-DM become items')
 tg.start().catch((err) => log(`telegram stopped: ${err instanceof Error ? err.name : 'unknown'}`))
 
@@ -46,6 +55,7 @@ async function shutdown(): Promise<void> {
   shuttingDown = true
   log('shutting down')
   orchestrator.stop()
+  socket?.stop()
   // A tick commits its cursors only at its end: let it finish, so the final save holds them (bounded: Slack calls time out at 30s).
   await Promise.race([orchestrator.idle(), new Promise((r) => setTimeout(r, 40_000).unref())])
   try { await tg.stop() } catch {}

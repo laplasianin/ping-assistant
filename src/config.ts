@@ -8,7 +8,7 @@ export type Config = {
   pollSeconds: number; settleSeconds: number; maxSettleSeconds: number;
   followUpDays: number; contextMessages: number; scentbirdRepoPath: string; triageTimeoutSeconds: number;
   dryRun: boolean; selfDmTest?: boolean; statePath: string;
-  socketReconcileTicks: number;
+  drainSeconds: number; socketReconcileTicks: number;
 }
 
 function expandHome(p: string): string {
@@ -31,6 +31,7 @@ const ConfigSchema = z.object({
   dryRun: z.boolean().default(false),
   selfDmTest: z.boolean().default(false),
   statePath: z.string().default('~/.config/ping-assistant/state.json'),
+  drainSeconds: z.number().positive().default(5),
   socketReconcileTicks: z.number().int().positive().default(10),
 })
 
@@ -60,12 +61,14 @@ function parseEnvFile(path: string): Record<string, string> {
   return out
 }
 
-export function loadSecrets(envPath = '~/.config/ping-assistant/.env'): { slackToken: string; telegramToken: string } {
+/** slackAppToken (`xapp-…`, Socket Mode) is optional: without it the server polls only. */
+export function loadSecrets(envPath = '~/.config/ping-assistant/.env'): { slackToken: string; telegramToken: string; slackAppToken?: string } {
   const file = parseEnvFile(expandHome(envPath))
   const get = (key: string): string => {
     const v = process.env[key] || file[key]
     if (!v) throw new Error(`Missing secret ${key} (set it in the environment or in ${envPath})`)
     return v
   }
-  return { slackToken: get('SLACK_USER_TOKEN'), telegramToken: get('TELEGRAM_BOT_TOKEN') }
+  const slackAppToken = process.env.SLACK_APP_TOKEN || file.SLACK_APP_TOKEN
+  return { slackToken: get('SLACK_USER_TOKEN'), telegramToken: get('TELEGRAM_BOT_TOKEN'), ...(slackAppToken ? { slackAppToken } : {}) }
 }

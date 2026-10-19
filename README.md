@@ -26,6 +26,16 @@ bun test            # тесты (стабильно без шума в stderr)
 3. *Install to Workspace* и подтвердить.
 4. Токен `xoxp-…` лежит там же, в *OAuth & Permissions* → **User OAuth Token**.
    Сообщения уходят от твоего имени, без бейджа приложения.
+5. Socket Mode (сообщения приходят за секунды, а не раз в `pollSeconds`; без него сервер просто опрашивает Slack):
+   - *Socket Mode* → **Enable Socket Mode**;
+   - *Basic Information* → **App-Level Tokens** → *Generate Token and Scopes*, scope `connections:write`;
+     получится токен `xapp-…`;
+   - *Event Subscriptions* → **Enable Events** → *Subscribe to events on behalf of users*:
+     `message.channels`, `message.groups`, `message.im`, `message.mpim` (Request URL не нужен);
+   - если Slack попросит, переустановить приложение (*Reinstall to Workspace*);
+   - положить токен в `.env` как `SLACK_APP_TOKEN=xapp-…` (см. «Секреты»).
+
+   `slack-app-manifest.json` уже включает Socket Mode и эти четыре события.
 
 ### Telegram-бот
 
@@ -47,7 +57,11 @@ bun test            # тесты (стабильно без шума в stderr)
 ```
 SLACK_USER_TOKEN=xoxp-…
 TELEGRAM_BOT_TOKEN=123456:…
+SLACK_APP_TOKEN=xapp-…        # необязательно: Socket Mode
 ```
+
+Без `SLACK_APP_TOKEN` сервер пишет в stderr `ping-assistant: SLACK_APP_TOKEN not set, polling only`
+и работает только опросом.
 
 Те же переменные из окружения имеют приоритет над файлом.
 
@@ -65,7 +79,9 @@ cp ping-assistant.config.example.json ping-assistant.config.json
 | `watchChannels` | ID каналов (`C…`), где отслеживаются треды; личка, группы-личек и упоминания читаются всегда |
 | `telegramChatId` | числовой chat id из шага выше, строкой |
 | `scentbirdRepoPath` | локальный клон репозитория; сессия читает из него код для разбора вопросов |
-| `pollSeconds` | период опроса Slack (60) |
+| `pollSeconds` | период опроса Slack без Socket Mode (60) |
+| `drainSeconds` | с Socket Mode: период тика, который разбирает пришедшие по сокету сообщения (5) |
+| `socketReconcileTicks` | с Socket Mode: опрос Slack (сверка) идёт раз в столько тиков, пока сокет подключён (10) |
 | `settleSeconds` | сколько ждать после последнего сообщения собеседника, прежде чем разбирать (90) |
 | `maxSettleSeconds` | потолок ожидания от первого сообщения (300) |
 | `followUpDays` | сколько дней после твоей отправки следить за тредом (7) |
@@ -97,7 +113,24 @@ bin/ping-assistant-up
 `plugin:…` требует *установленного* плагина из маркетплейса, `--plugin-dir` установкой не считается,
 и CLI пишет «plugin not installed» и «not on the approved channels allowlist». Инструменты сессии
 называются `mcp__ping-assistant__<tool>`.
-Первый тик (через `pollSeconds`) ставит курсоры на «сейчас», прошлое не разбирается.
+Первый тик (через `pollSeconds`, с Socket Mode — через `drainSeconds`) ставит курсоры на «сейчас», прошлое не разбирается.
+
+### Как работает: Socket Mode и опрос
+
+С `SLACK_APP_TOKEN` сервер держит WebSocket Socket Mode (`apps.connections.open`): события
+`message.*` приходят за секунды, подтверждаются сразу и складываются в очередь. Тик идёт каждые
+`drainSeconds` и разбирает очередь теми же фильтрами, что и опрос (боты, системные подтипы,
+дедуп по `channel+ts`); источник — личка, группа-личка, канал из `watchChannels`, упоминание
+`<@userId>` или тред под наблюдением, остальное отбрасывается. Slack такие тики не опрашивают
+(кроме кэшируемых имён и permalink). Айтем по-прежнему созревает через `settleSeconds` после
+последнего сообщения.
+
+Опрос остаётся сверкой: пока сокет подключён, он идёт раз в `socketReconcileTicks` тиков
+(при 5 с и 10 — раз в 50 с) и сразу после каждого (пере)подключения, чтобы дочитать пропущенное,
+пока сокет лежал. Пока сокет отключён, опрос идёт каждый тик. Сокет переподключается сам
+(пауза 1 → 15 с; на `disconnect` от Slack — сразу). Сообщение из сокета сдвигает курсор
+разговора, только если опрос уже читал этот разговор после подключения, иначе пропущенное
+во время обрыва не потерялось бы для сверки.
 
 Новые сообщения в личках находятся одним поиском за тик (`search.messages`, `is:dm`): читаются
 только лички, где поиск что-то нашёл. Индекс поиска Slack может отставать до минуты, так что
@@ -203,7 +236,8 @@ Slack читается по-настоящему, отправки нет.
 
 Автоматически (`bun test`): весь поток от сбора до отправки на фейковых Slack и Telegram API и
 настоящем MCP-канале, включая follow-up в треде (`test/orchestrator.test.ts`) и истечение слежения
-(`test/collector.test.ts`); смоук `scripts/smoke-check.ts` с фиктивными токенами проходит.
+(`test/collector.test.ts`), Socket Mode на фейковых fetch и WebSocket (`test/slack-socket.test.ts`:
+ack, переподключение, backoff) и очередь сокета в сборщике и оркестраторе; смоук `scripts/smoke-check.ts` с фиктивными токенами проходит.
 Вручную с настоящими токенами (2026-10-19, dry-run):
 
 - Токены проверены: `auth.test` отвечает владельцем в воркспейсе, `getMe` — ботом.
@@ -216,7 +250,8 @@ Slack читается по-настоящему, отправки нет.
 - Интерактивная сессия (`bin/ping-assistant-up` с `--dangerously-load-development-channels server:ping-assistant`,
   `PING_ASSISTANT_SELFTEST=1`): шапка показывает канал `server:ping-assistant`, через ~10 с
   пришло `{"text":"selftest"}` и сессия ответила `SELFTEST-OK`. Пробуждение подтверждено.
-- Ещё не подтверждено вживую: прохождение айтема до Telegram с кнопками, первая боевая отправка.
+- Ещё не подтверждено вживую: прохождение айтема до Telegram с кнопками, первая боевая отправка,
+  Socket Mode с настоящим `xapp-…` токеном.
 
 - 2026-10-19, эксперимент «пробуждение»: `claude -p` с `--plugin-dir . --channels plugin:ping-assistant@local`, `PING_ASSISTANT_SELFTEST=1`, фиктивные токены Slack/Telegram, dry-run. Итог: `SELFTEST-NONE` (первая попытка с `--max-turns 4` — `Reached max turns`). Плагин загрузился, сервер стартовал (`started (dry-run)`, подключение по stdio за ~150 мс) и жил 40 с с недоступными Slack/Telegram; строки `selftest notification sent` в захваченном stderr сервера не было, так что отправку уведомления эксперимент не подтвердил. Доказано: плагин грузится и сервер стартует с фиктивными токенами. Не доказано ничего про пробуждение: в `-p`-сессии (`nonInteractive=true`, `advertise=false` в debug-логе) канальные события посреди хода, видимо, не обрабатываются, поэтому NONE для интерактивных сессий неинформативен. Интерактивная проверка: `PING_ASSISTANT_SELFTEST=1 bin/ping-assistant-up`.
 

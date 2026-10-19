@@ -8,12 +8,15 @@ import { ItemMessages, itemJson, lastPart, msgJson, withoutHint } from './item-m
 import { ingest, mature } from './items'
 import type { RawMsg, SlackClient } from './slack/client'
 import { applyCursors, cmpTs, type Collector } from './slack/collector'
+import type { SlackSocket } from './slack/socket'
 import type { Item, ItemStatus, SlackMsg, State, StateStore } from './state'
 import type { Inbound, TelegramBot } from './telegram/bot'
 
 export type OrchestratorDeps = {
   cfg: Config; store: Pick<StateStore, 'save'>; state: State; slack: SlackClient;
-  collector: Pick<Collector, 'tick'>; tg: TelegramBot; channel: Pick<Channel, 'notify'>; now?: () => number
+  collector: Pick<Collector, 'tick'> & Partial<Pick<Collector, 'socketConnected'>>; tg: TelegramBot; channel: Pick<Channel, 'notify'>; now?: () => number
+  /** Socket Mode: ticks every drainSeconds and mostly drain the socket queue; polling reconciles every socketReconcileTicks. */
+  socket?: Pick<SlackSocket, 'isConnected'>
 }
 
 const CLOSED: ItemStatus[] = ['sent', 'skipped', 'answered_manually']
@@ -46,7 +49,7 @@ export class Orchestrator {
       }
     }
     tg.onInbound((i) => this.handle(i))
-    this.timer = setInterval(() => { void this.tick() }, cfg.pollSeconds * 1000)
+    this.timer = setInterval(() => { void this.tick() }, (this.d.socket ? cfg.drainSeconds : cfg.pollSeconds) * 1000)
   }
 
   stop(): void {
@@ -69,6 +72,7 @@ export class Orchestrator {
     const { state, cfg, collector } = this.d
     try {
       const now = this.now()
+      if (this.d.socket) collector.socketConnected = this.d.socket.isConnected() // down: poll every tick
       const batch = await collector.tick(now)
       for (const { msg, source } of batch.collected) {
         const ev = ingest(state, msg, source, now, cfg)

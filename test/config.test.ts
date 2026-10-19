@@ -1,4 +1,4 @@
-import { test, expect, afterEach } from 'bun:test'
+import { test, expect, afterEach, beforeEach } from 'bun:test'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
@@ -14,7 +14,9 @@ afterEach(() => {
   while (dirs.length) rmSync(dirs.pop()!, { recursive: true, force: true })
   delete process.env.SLACK_USER_TOKEN
   delete process.env.TELEGRAM_BOT_TOKEN
+  delete process.env.SLACK_APP_TOKEN
 })
+beforeEach(() => { delete process.env.SLACK_APP_TOKEN })
 
 function writeJson(obj: unknown): string {
   const p = join(tmp(), 'config.json')
@@ -37,6 +39,8 @@ test('loadConfig applies defaults', () => {
   expect(cfg.followUpDays).toBe(7)
   expect(cfg.contextMessages).toBe(30)
   expect(cfg.triageTimeoutSeconds).toBe(600)
+  expect(cfg.drainSeconds).toBe(5)
+  expect(cfg.socketReconcileTicks).toBe(10)
   expect(cfg.dryRun).toBe(false)
   expect(cfg.statePath).toBe(join(homedir(), '.config/ping-assistant/state.json'))
 })
@@ -89,4 +93,20 @@ test('selfDmTest defaults to false and is accepted together with dryRun', () => 
 test('selfDmTest without dryRun is rejected', () => {
   expect(() => loadConfig(writeJson({ ...base, selfDmTest: true }))).toThrow('selfDmTest requires dryRun: true')
   expect(() => loadConfig(writeJson({ ...base, dryRun: false, selfDmTest: true }))).toThrow('selfDmTest requires dryRun: true')
+})
+
+test('loadSecrets: SLACK_APP_TOKEN is optional and read from the file or the environment', () => {
+  const p = join(tmp(), '.env')
+  writeFileSync(p, 'SLACK_USER_TOKEN=xoxp\nTELEGRAM_BOT_TOKEN=tg\n')
+  expect(loadSecrets(p).slackAppToken).toBeUndefined()
+  writeFileSync(p, 'SLACK_USER_TOKEN=xoxp\nTELEGRAM_BOT_TOKEN=tg\nSLACK_APP_TOKEN=xapp-file\n')
+  expect(loadSecrets(p)).toEqual({ slackToken: 'xoxp', telegramToken: 'tg', slackAppToken: 'xapp-file' })
+  process.env.SLACK_APP_TOKEN = 'xapp-env'
+  expect(loadSecrets(p).slackAppToken).toBe('xapp-env')
+})
+
+test('loadConfig keeps explicit drainSeconds and socketReconcileTicks; rejects a fractional tick count', () => {
+  const cfg = loadConfig(writeJson({ ...base, drainSeconds: 2, socketReconcileTicks: 4 }))
+  expect([cfg.drainSeconds, cfg.socketReconcileTicks]).toEqual([2, 4])
+  expect(() => loadConfig(writeJson({ ...base, socketReconcileTicks: 1.5 }))).toThrow(/socketReconcileTicks/)
 })

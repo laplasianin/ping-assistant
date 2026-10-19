@@ -84,7 +84,7 @@ type NoteParams = z.infer<typeof Note>['params']
 const baseCfg: Config = {
   userId: 'ME', watchChannels: ['C1'], telegramChatId: String(CHAT), pollSeconds: 3600, settleSeconds: 90,
   maxSettleSeconds: 300, followUpDays: 7, contextMessages: 30, triageTimeoutSeconds: 600, scentbirdRepoPath: '/tmp', dryRun: false,
-  statePath: '/tmp/ping-assistant-test/state.json',
+  statePath: '/tmp/ping-assistant-test/state.json', drainSeconds: 5, socketReconcileTicks: 10,
 }
 
 let stderr: ReturnType<typeof spyOn>
@@ -95,6 +95,7 @@ afterEach(() => { env?.orch.stop(); stderr.mockRestore() })
 async function setup(
   cfgOverrides: Partial<Config> = {}, state: State = emptyState(),
   realCollector?: (slack: FakeSlack, cfg: Config) => Collector,
+  socket?: { isConnected(): boolean },
 ) {
   const cfg = { ...baseCfg, ...cfgOverrides }
   const slack = new FakeSlack()
@@ -107,7 +108,7 @@ async function setup(
   let channel!: Channel
   const orch = new Orchestrator({
     cfg, store, state, slack: slack as unknown as SlackClient, collector: (realCollector?.(slack, cfg) ?? collector) as never, tg,
-    channel: { notify: (c: string, m: Record<string, string>) => channel.notify(c, m) } as Channel, now: () => clock,
+    channel: { notify: (c: string, m: Record<string, string>) => channel.notify(c, m) } as Channel, now: () => clock, socket,
   })
   channel = new Channel(orch.handlers())
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
@@ -927,4 +928,38 @@ test('selfDmTest: a new own self-DM message counts as foreign in the pre-send ch
 
   expect(e.state.items['1']!.status).not.toBe('answered_manually')
   expect(e.state.items['1']!.status).not.toBe('sent')
+})
+
+test('socket mode: an enqueued DM becomes an item and, after the settle window, a kind:item notification without any history read', async () => {
+  const ts = (sec: number) => `${T0 / 1000 + sec}.000000`
+  const state = emptyState()
+  let collector!: Collector
+  const sock = { up: true, isConnected() { return this.up } }
+  const intervals: number[] = []
+  const spy = spyOn(globalThis, 'setInterval').mockImplementation(((fn: () => void, ms: number) => { intervals.push(ms); return 0 as never }) as never)
+  let e: Awaited<ReturnType<typeof setup>>
+  try {
+    e = await setup({}, state, (slack, cfg) => (collector = new Collector(slack as never, cfg, state, '/tmp/ping-assistant-test/files')), sock)
+  } finally { spy.mockRestore() }
+  expect(intervals).toEqual([5000]) // drainSeconds, not pollSeconds
+  let historyCalls = 0
+  const history = e.slack.history.bind(e.slack)
+  e.slack.history = async (c, o) => { historyCalls++; return history(c, o) }
+
+  await e.orch.tick() // connect tick: first-run cursors
+  expect(collector.socketConnected).toBe(true)
+  collector.enqueue({ channel: 'D7', ts: ts(1), user: 'U2', text: 'Можешь глянуть PR?' }, 'im')
+  e.advance(5_000)
+  await e.orch.tick()
+  expect(e.state.items['1']).toMatchObject({ source: 'im', status: 'settling', channel: 'D7', author: 'U2' })
+  e.advance(91_000)
+  await e.orch.tick()
+  await e.flush()
+  expect(e.notes.map((n) => [n.meta.kind, n.meta.item_id])).toEqual([['item', '1']])
+  expect(JSON.parse(e.notes[0]!.content)).toMatchObject({ id: '1', source: 'im', messages: [{ ts: ts(1), text: 'Можешь глянуть PR?' }] })
+  expect(historyCalls).toBe(0)
+
+  sock.up = false // socket down: the next tick polls again
+  await e.orch.tick()
+  expect(collector.socketConnected).toBe(false)
 })

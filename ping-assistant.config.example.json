@@ -4,6 +4,8 @@
   "telegramChatId": "123456789",
   "scentbirdRepoPath": "/Users/you/projects/scentbird",
   "pollSeconds": 60,
+  "drainSeconds": 5,
+  "socketReconcileTicks": 10,
   "settleSeconds": 90,
   "maxSettleSeconds": 300,
   "followUpDays": 7,
