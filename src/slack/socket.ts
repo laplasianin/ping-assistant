@@ -3,7 +3,9 @@
 import type { RawMsg } from './client'
 
 export type ChannelType = 'im' | 'mpim' | 'channel' | 'group'
-export type SocketEvent = RawMsg & { channel: string; channelType: ChannelType }
+/** epoch: the connection (SlackSocket.epoch()) it arrived on. */
+export type SocketEvent = RawMsg & { channel: string; channelType: ChannelType; epoch: number }
+type Outcome = 'hello' | 'refresh' | 'failed'
 
 /** The part of a WebSocket the client uses: Bun's global WebSocket fits, tests inject a fake. */
 export type WebSocketLike = {
@@ -21,6 +23,7 @@ export type SlackSocketOptions = {
   wsFactory?: (url: string) => WebSocketLike
   sleep?: (ms: number) => Promise<void>
   log?: (line: string) => void
+  now?: () => number
 }
 
 const OPEN_URL = 'https://slack.com/api/apps.connections.open'
@@ -28,6 +31,8 @@ const MIN_BACKOFF_MS = 1000
 const MAX_BACKOFF_MS = 15_000
 const OPEN_TIMEOUT_MS = 30_000
 const CHANNEL_TYPES = new Set<string>(['im', 'mpim', 'channel', 'group'])
+/** apps.connections.open errors that retrying cannot fix: log once, stop, keep polling. */
+const FATAL_OPEN_ERRORS = new Set(['invalid_auth', 'not_allowed_token_type', 'token_revoked', 'account_inactive', 'missing_scope'])
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms).unref())
 const defaultLog = (line: string): void => { process.stderr.write(`ping-assistant: ${line}\n`) }
@@ -39,14 +44,15 @@ function frameText(data: unknown): string {
 }
 
 /** A Slack message event as the collector's RawMsg; undefined for events it cannot place. */
-function toEvent(e: Record<string, any>): SocketEvent | undefined {
+function toEvent(e: Record<string, any>, epoch: number): SocketEvent | undefined {
+  if (e.hidden === true) return undefined // edits, deletions, replied markers: not new messages
   if (typeof e.channel !== 'string' || typeof e.ts !== 'string' || !CHANNEL_TYPES.has(e.channel_type)) return undefined
   const files = Array.isArray(e.files)
     ? e.files.map((f: Record<string, any>) => ({ id: f.id, name: f.name, url_private_download: f.url_private_download }))
     : undefined
   return {
     channel: e.channel, channelType: e.channel_type, ts: e.ts, thread_ts: e.thread_ts, user: e.user, bot_id: e.bot_id,
-    subtype: e.subtype, text: typeof e.text === 'string' ? e.text : '', files, latest_reply: undefined,
+    subtype: e.subtype, text: typeof e.text === 'string' ? e.text : '', files, latest_reply: undefined, epoch,
   }
 }
 
@@ -55,21 +61,35 @@ export class SlackSocket {
   private readonly wsFactory: (url: string) => WebSocketLike
   private readonly sleep: (ms: number) => Promise<void>
   private readonly log: (line: string) => void
+  private readonly now: () => number
   private stopped = true
   private connected = false
+  private epochNo = 0
+  private lastFrame: number | undefined
   private ws: WebSocketLike | undefined
   /** Ends the current connection's wait; set while a WebSocket is open. */
-  private endSession: (() => void) | undefined
+  private endSession: ((outcome?: Outcome) => void) | undefined
 
   constructor(private readonly appToken: string, private readonly opts: SlackSocketOptions) {
     this.fetchImpl = opts.fetchImpl ?? fetch
     this.wsFactory = opts.wsFactory ?? ((url) => new WebSocket(url) as unknown as WebSocketLike)
     this.sleep = opts.sleep ?? defaultSleep
     this.log = opts.log ?? defaultLog
+    this.now = opts.now ?? Date.now
   }
 
   isConnected(): boolean {
     return this.connected
+  }
+
+  /** Incremented on every hello: events of different epochs may have a gap between them. */
+  epoch(): number {
+    return this.epochNo
+  }
+
+  /** When the current connection last received a frame of any kind (undefined while not connected). */
+  lastFrameAt(): number | undefined {
+    return this.connected ? this.lastFrame : undefined
   }
 
   start(): void {
@@ -81,22 +101,45 @@ export class SlackSocket {
   stop(): void {
     this.stopped = true
     this.connected = false
-    try { this.ws?.close() } catch {}
+    const ws = this.ws
     this.endSession?.()
+    try { ws?.close() } catch {}
+  }
+
+  /** Drops the current connection (it may be half-open after sleep or a network change) and opens a new one. */
+  reconnect(reason: string): void {
+    const ws = this.ws
+    if (!ws || this.stopped) return
+    this.log(`socket: reconnect (${reason})`)
+    this.endSession?.('refresh')
+    try { ws.close() } catch {}
   }
 
   /** One connection after another; the WebSocket URL is single-use, so every attempt opens a new one. */
   private async loop(): Promise<void> {
     let delay = MIN_BACKOFF_MS
     while (!this.stopped) {
-      let outcome: 'hello' | 'refresh' | 'failed' = 'failed'
+      let outcome: Outcome = 'failed'
       try {
-        outcome = await this.session(await this.open())
+        const url = await this.open()
+        if (this.stopped) break // stopped while the open was in flight
+        outcome = await this.session(url)
       } catch (err) {
-        this.log(`socket: open failed (${err instanceof Error ? err.name : 'unknown'})`)
+        const name = err instanceof Error ? err.name : 'unknown'
+        if (FATAL_OPEN_ERRORS.has(name)) {
+          this.log(`socket: open failed (${name}), giving up: polling only`)
+          this.stopped = true
+          break
+        }
+        this.log(`socket: open failed (${name})`)
       }
       if (this.stopped) break
-      if (outcome === 'refresh') { delay = MIN_BACKOFF_MS; continue } // Slack asked for it: reconnect right away
+      if (outcome === 'refresh') {
+        // Requested reconnects (Slack's disconnect, a stale connection) are not failures, but never back to back.
+        delay = MIN_BACKOFF_MS
+        await this.sleep(MIN_BACKOFF_MS)
+        continue
+      }
       if (outcome === 'hello') delay = MIN_BACKOFF_MS
       this.log(`socket: reconnecting in ${delay / 1000}s`)
       await this.sleep(delay)
@@ -119,50 +162,55 @@ export class SlackSocket {
     return body.url
   }
 
-  /** Resolves when the connection ends: 'hello' if it was established, 'refresh' on a requested disconnect. */
-  private session(url: string): Promise<'hello' | 'refresh' | 'failed'> {
+  /** Resolves when the connection ends: 'hello' if it was established, 'refresh' on a requested reconnect. */
+  private session(url: string): Promise<Outcome> {
     return new Promise((resolve) => {
-      let outcome: 'hello' | 'refresh' | 'failed' = 'failed'
+      let outcome: Outcome = 'failed'
       let done = false
       const ws = this.wsFactory(url)
       this.ws = ws
-      const end = (): void => {
+      const end = (final?: Outcome): void => {
         if (done) return
         done = true
+        if (final) outcome = final
         this.connected = false
         this.ws = undefined
         this.endSession = undefined
         resolve(outcome)
       }
       this.endSession = end
-      ws.onmessage = (ev) => {
+      const onFrame = (data: unknown): void => {
+        this.lastFrame = this.now()
         let msg: Record<string, any>
-        try { msg = JSON.parse(frameText(ev.data)) as Record<string, any> } catch { return }
+        try { msg = JSON.parse(frameText(data)) as Record<string, any> } catch { return }
         if (msg.type === 'hello') {
           outcome = 'hello'
+          this.epochNo++
           this.connected = true
           this.log('socket: connected')
         } else if (msg.type === 'disconnect') {
           this.log('socket: disconnect requested')
-          outcome = 'refresh'
-          end() // before close(): the close that follows is ours, not news
+          end('refresh') // before close(): the close that follows is ours, not news
           try { ws.close() } catch {}
         } else if (typeof msg.envelope_id === 'string') {
           // Ack first: Slack redelivers an envelope that is not acked within 3s.
           ws.send(JSON.stringify({ envelope_id: msg.envelope_id }))
           const event = msg.type === 'events_api' ? msg.payload?.event : undefined
           if (event?.type !== 'message') return
-          const raw = toEvent(event)
+          const raw = toEvent(event, this.epochNo)
           if (raw) this.opts.onEvent(raw)
         }
+      }
+      ws.onmessage = (ev) => {
+        try { onFrame(ev?.data) } catch (err) { this.log(`socket: frame failed (${err instanceof Error ? err.name : 'unknown'})`) }
       }
       ws.onclose = (ev) => {
         if (!done && !this.stopped) this.log(`socket: closed (${ev?.code ?? 'unknown'})`)
         end()
       }
       ws.onerror = () => {
-        try { ws.close() } catch {}
         end()
+        try { ws.close() } catch {}
       }
     })
   }

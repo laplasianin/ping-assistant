@@ -68,7 +68,7 @@ test('events_api message: ack with the envelope_id first, then onEvent with the 
   expect(s.order).toEqual(['send {"envelope_id":"env-1"}', 'event 101.5'])
   expect(s.events).toEqual([{
     channel: 'D1', channelType: 'im', ts: '101.5', thread_ts: '100.0', user: 'U2', bot_id: undefined, subtype: undefined,
-    text: 'secret text', files: [{ id: 'F1', name: 'a.png', url_private_download: 'https://files/a.png' }], latest_reply: undefined,
+    text: 'secret text', files: [{ id: 'F1', name: 'a.png', url_private_download: 'https://files/a.png' }], latest_reply: undefined, epoch: 1,
   }])
   expect(s.logs.join('\n')).not.toContain('secret')
   s.socket.stop()
@@ -152,7 +152,23 @@ test('a failing apps.connections.open is retried with backoff, logging only the 
   s.socket.stop()
 })
 
-test('an ok:false open response is a failure named by its Slack error', async () => {
+test('a retryable ok:false open response is a failure named by its Slack error, retried', async () => {
+  const logs: string[] = []
+  let calls = 0
+  const socket = new SlackSocket('xapp-x', {
+    onEvent: () => {},
+    fetchImpl: (async () => { calls++; return new Response(JSON.stringify({ ok: false, error: 'ratelimited' })) }) as unknown as typeof fetch,
+    wsFactory: () => { throw new Error('must not connect') },
+    sleep: async () => { if (calls >= 2) socket.stop() },
+    log: (l) => logs.push(l),
+  })
+  socket.start()
+  await flush()
+  expect(logs[0]).toBe('socket: open failed (ratelimited)')
+  expect(calls).toBe(2)
+})
+
+test('a fatal open error (invalid_auth) is logged once and not retried', async () => {
   const logs: string[] = []
   let calls = 0
   const socket = new SlackSocket('xapp-bad', {
@@ -164,8 +180,9 @@ test('an ok:false open response is a failure named by its Slack error', async ()
   })
   socket.start()
   await flush()
-  expect(logs[0]).toBe('socket: open failed (invalid_auth)')
-  expect(calls).toBe(2)
+  expect(logs).toEqual(['socket: open failed (invalid_auth), giving up: polling only'])
+  expect(calls).toBe(1)
+  expect(socket.isConnected()).toBe(false)
 })
 
 test('stop() closes the socket and prevents reconnecting', async () => {
@@ -189,5 +206,110 @@ test('malformed frames are ignored', async () => {
   s.last().emit({ type: 'events_api', payload: { event: { type: 'message', channel: 'C1', ts: '1.0', text: 'x' } } }) // no envelope_id
   expect(s.last().sent).toEqual([])
   expect(s.events).toEqual([]) // an envelope that cannot be acked is not processed
+  s.socket.stop()
+})
+
+test('epoch increments on every hello and tags the events; lastFrameAt tracks any frame', async () => {
+  let clock = 1000
+  const events: number[] = []
+  const sockets: FakeWs[] = []
+  const socket = new SlackSocket('xapp', {
+    onEvent: (raw) => events.push(raw.epoch),
+    fetchImpl: (async () => new Response(JSON.stringify({ ok: true, url: 'wss://x' }))) as unknown as typeof fetch,
+    wsFactory: (url) => { const ws = new FakeWs(url, []); sockets.push(ws); return ws },
+    sleep: async () => {}, log: () => {}, now: () => clock,
+  })
+  const msg = (id: string) => ({ envelope_id: id, type: 'events_api', payload: { event: { type: 'message', channel: 'D1', channel_type: 'im', ts: '1.0', text: '' } } })
+  socket.start()
+  await flush()
+  expect(socket.epoch()).toBe(0)
+  expect(socket.lastFrameAt()).toBeUndefined()
+  sockets.at(-1)!.emit({ type: 'hello' })
+  sockets.at(-1)!.emit(msg('a'))
+  expect(socket.lastFrameAt()).toBe(1000)
+  clock = 5000
+  sockets.at(-1)!.emit({ type: 'ping-ish' })
+  expect(socket.lastFrameAt()).toBe(5000)
+  sockets.at(-1)!.drop(1006)
+  await flush()
+  expect(socket.lastFrameAt()).toBeUndefined()
+  sockets.at(-1)!.emit({ type: 'hello' })
+  sockets.at(-1)!.emit(msg('b'))
+  expect(socket.epoch()).toBe(2)
+  expect(events).toEqual([1, 2])
+  socket.stop()
+})
+
+test('reconnect() drops the current connection and opens a new one after 1s', async () => {
+  const s = setup()
+  s.socket.start()
+  await flush()
+  const first = s.last()
+  first.emit({ type: 'hello' })
+  s.socket.reconnect('stale')
+  await flush()
+  expect(first.closed).toBe(true)
+  expect(s.opens.length).toBe(2)
+  expect(s.sleeps).toEqual([1000])
+  expect(s.logs).toContain('socket: reconnect (stale)')
+  expect(s.logs.some((l) => l.startsWith('socket: closed'))).toBe(false)
+  s.socket.stop()
+})
+
+test('repeated disconnect frames: at least 1s between refreshes', async () => {
+  const s = setup()
+  s.socket.start()
+  await flush()
+  for (let i = 0; i < 3; i++) { s.last().emit({ type: 'disconnect', reason: 'refresh_requested' }); await flush() }
+  expect(s.opens.length).toBe(4)
+  expect(s.sleeps).toEqual([1000, 1000, 1000])
+  s.socket.stop()
+})
+
+test('stop() while apps.connections.open is in flight creates no socket', async () => {
+  let release!: (r: Response) => void
+  let created = 0
+  const socket = new SlackSocket('xapp', {
+    onEvent: () => {},
+    fetchImpl: (() => new Promise<Response>((r) => { release = r })) as unknown as typeof fetch,
+    wsFactory: (url) => { created++; return new FakeWs(url, []) },
+    sleep: async () => {}, log: () => {},
+  })
+  socket.start()
+  await flush()
+  socket.stop()
+  release(new Response(JSON.stringify({ ok: true, url: 'wss://x' })))
+  await flush()
+  expect(created).toBe(0)
+})
+
+test('a throwing onEvent is logged by error name and the socket keeps working', async () => {
+  const logs: string[] = []
+  let n = 0
+  const sockets: FakeWs[] = []
+  const socket = new SlackSocket('xapp', {
+    onEvent: () => { n++; if (n === 1) throw new RangeError('boom secret') },
+    fetchImpl: (async () => new Response(JSON.stringify({ ok: true, url: 'wss://x' }))) as unknown as typeof fetch,
+    wsFactory: (url) => { const ws = new FakeWs(url, []); sockets.push(ws); return ws },
+    sleep: async () => {}, log: (l) => logs.push(l),
+  })
+  const msg = (id: string) => ({ envelope_id: id, type: 'events_api', payload: { event: { type: 'message', channel: 'D1', channel_type: 'im', ts: '1.0', text: '' } } })
+  socket.start()
+  await flush()
+  sockets[0]!.emit(msg('a'))
+  sockets[0]!.emit(msg('b'))
+  expect(n).toBe(2)
+  expect(sockets[0]!.sent.length).toBe(2)
+  expect(logs).toEqual(['socket: frame failed (RangeError)'])
+  socket.stop()
+})
+
+test('hidden message events (edits, message_replied) are acked and not delivered', async () => {
+  const s = setup()
+  s.socket.start()
+  await flush()
+  s.last().emit({ envelope_id: 'h', type: 'events_api', payload: { event: { type: 'message', subtype: 'message_replied', hidden: true, channel: 'C1', channel_type: 'channel', ts: '1.0', message: { text: 'x' } } } })
+  expect(s.last().sent).toEqual(['{"envelope_id":"h"}'])
+  expect(s.events).toEqual([])
   s.socket.stop()
 })
