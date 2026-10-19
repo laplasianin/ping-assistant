@@ -208,8 +208,10 @@ Slack читается по-настоящему, отправки нет.
 - Прямой запуск сервера как MCP-клиента (`scripts/smoke-check.ts`-стиль): шесть инструментов,
   `say` → «sent to Telegram», сообщение от бота пришло в личку; Telegram-поллер стартовал;
   завершение чистое.
-- Ещё не подтверждено вживую: `SELFTEST-OK` в интерактивной сессии, прохождение айтема до
-  Telegram с кнопками, первая боевая отправка (следующие пункты чек-листа).
+- Интерактивная сессия (`bin/ping-assistant-up` с `--dangerously-load-development-channels server:ping-assistant`,
+  `PING_ASSISTANT_SELFTEST=1`): шапка показывает канал `server:ping-assistant`, через ~10 с
+  пришло `{"text":"selftest"}` и сессия ответила `SELFTEST-OK`. Пробуждение подтверждено.
+- Ещё не подтверждено вживую: прохождение айтема до Telegram с кнопками, первая боевая отправка.
 
 - 2026-10-19, эксперимент «пробуждение»: `claude -p` с `--plugin-dir . --channels plugin:ping-assistant@local`, `PING_ASSISTANT_SELFTEST=1`, фиктивные токены Slack/Telegram, dry-run. Итог: `SELFTEST-NONE` (первая попытка с `--max-turns 4` — `Reached max turns`). Плагин загрузился, сервер стартовал (`started (dry-run)`, подключение по stdio за ~150 мс) и жил 40 с с недоступными Slack/Telegram; строки `selftest notification sent` в захваченном stderr сервера не было, так что отправку уведомления эксперимент не подтвердил. Доказано: плагин грузится и сервер стартует с фиктивными токенами. Не доказано ничего про пробуждение: в `-p`-сессии (`nonInteractive=true`, `advertise=false` в debug-логе) канальные события посреди хода, видимо, не обрабатываются, поэтому NONE для интерактивных сессий неинформативен. Интерактивная проверка: `PING_ASSISTANT_SELFTEST=1 bin/ping-assistant-up`.
 
