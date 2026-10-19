@@ -115,6 +115,13 @@ bin/ping-assistant-up
 называются `mcp__ping-assistant__<tool>`.
 Первый тик (через `pollSeconds`, с Socket Mode — через `drainSeconds`) ставит курсоры на «сейчас», прошлое не разбирается.
 
+Модель сессии задаёт `PING_ASSISTANT_MODEL` (по умолчанию `claude-sonnet-5-5`; например,
+`PING_ASSISTANT_MODEL=claude-opus-5-5 bin/ping-assistant-up` или `claude-fable-5-1`); launcher
+передаёт её в `claude --model`. Идея эскалации: сессия на дешёвой модели занимается триажем, а
+ресёрч и черновики вариантов для сложных айтемов (technical/product, несколько вопросов,
+файлы, низкая уверенность) делает субагент на Opus; правила — в `CLAUDE.md`, раздел «Модели и
+эскалация».
+
 ### Как работает: Socket Mode и опрос
 
 С `SLACK_APP_TOKEN` сервер держит WebSocket Socket Mode (`apps.connections.open`): события
