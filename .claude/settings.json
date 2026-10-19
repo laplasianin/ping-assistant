@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__plugin_ping-assistant_ping-assistant__propose",
+      "mcp__plugin_ping-assistant_ping-assistant__ignore",
+      "mcp__plugin_ping-assistant_ping-assistant__close",
+      "mcp__plugin_ping-assistant_ping-assistant__list_items",
+      "mcp__plugin_ping-assistant_ping-assistant__list_ignored",
+      "mcp__plugin_ping-assistant_ping-assistant__say",
+      "Read",
+      "Grep",
+      "Glob",
+      "Agent",
+      "mcp__plugin_atlassian_atlassian__getJiraIssue",
+      "mcp__plugin_atlassian_atlassian__searchJiraIssuesUsingJql",
+      "mcp__plugin_atlassian_atlassian__searchConfluence",
+      "mcp__plugin_atlassian_atlassian__getConfluenceContent",
+      "mcp__plugin_atlassian_atlassian__search",
+      "mcp__claude_ai_Slack__slack_search_public",
+      "mcp__claude_ai_Slack__slack_search_public_and_private",
+      "mcp__claude_ai_Slack__slack_read_thread",
+      "mcp__claude_ai_Slack__slack_read_channel",
+      "mcp__claude_ai_Slack__slack_read_user_profile"
+    ],
+    "deny": [
+      "mcp__claude_ai_Slack__slack_send_message",
+      "mcp__claude_ai_Slack__slack_send_message_draft",
+      "mcp__claude_ai_Slack__slack_schedule_message",
+      "mcp__claude_ai_Slack__slack_add_reaction",
+      "Bash(git push:*)",
+      "Edit",
+      "Write",
+      "NotebookEdit",
+      "WebFetch"
+    ]
+  }
+}
