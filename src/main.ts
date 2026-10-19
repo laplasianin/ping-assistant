@@ -35,7 +35,7 @@ tg.start().catch((err) => log(`telegram stopped: ${err instanceof Error ? err.na
 
 // Self-test hook: one synthetic notification, to check that a channel event reaches the session.
 if (process.env.PING_ASSISTANT_SELFTEST === '1') {
-  setTimeout(() => { void channel!.notify(JSON.stringify({ text: 'selftest' }), { kind: 'selftest' }).then(() => log('selftest notification sent')) }, 10_000).unref()
+  setTimeout(() => { void channel!.notify(JSON.stringify({ text: 'selftest' }), { kind: 'selftest' }).then(() => log('selftest notification sent')).catch((err) => log('selftest notify failed: ' + (err instanceof Error ? err.name : 'error'))) }, 10_000).unref()
 }
 
 // Claude Code closing the connection EOFs stdin; exit instead of lingering as a zombie.

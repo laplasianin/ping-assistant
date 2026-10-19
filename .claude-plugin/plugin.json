@@ -1,1 +1,6 @@
-{ "name": "ping-assistant", "description": "Slack inbox for Ilya: triage, drafts, send-as-me", "version": "0.1.0" }
+{
+  "name": "ping-assistant",
+  "description": "Slack inbox for Ilya: triage, drafts, send-as-me",
+  "version": "0.1.0",
+  "mcpServers": { "ping-assistant": { "command": "bun", "args": ["run", "${CLAUDE_PLUGIN_ROOT}/src/main.ts"] } }
+}
