@@ -7,7 +7,8 @@ import type { Config } from '../src/config'
 import { slackify } from '../src/format'
 import { Orchestrator } from '../src/orchestrator'
 import type { RawMsg, SlackClient } from '../src/slack/client'
-import { Collector, type Collected } from '../src/slack/collector'
+import { Collector, type Collected, type TickResult } from '../src/slack/collector'
+import * as items from '../src/items'
 import { emptyState, type SlackMsg, type State, type StateStore } from '../src/state'
 import { TelegramBot, type TelegramApi } from '../src/telegram/bot'
 
@@ -70,7 +71,7 @@ class FakeApi implements TelegramApi {
 
 class FakeCollector {
   queue: Collected[] = []
-  async tick(): Promise<Collected[]> { return this.queue.splice(0) }
+  async tick(): Promise<TickResult> { return { collected: this.queue.splice(0), cursorUpdates: {}, removeCursors: [] } }
 }
 
 const Note = z.object({
@@ -652,4 +653,62 @@ test('a long (>4096) item: revision leaves no live old buttons and the outcome e
   const done = e.api.lastEdit(second.id)!
   expect(done.text).toEndWith('✅ отправлен вариант 2')
   expect(done.opts.reply_markup).toEqual({ inline_keyboard: [] })
+})
+
+test('a tick that fails mid-ingest commits no cursors, and a restart replays the lost message', async () => {
+  const sec = (s: number) => `${T0 / 1000 + s}.000000`
+  const seed = () => {
+    const st = emptyState()
+    st.cursors = { lastTick: sec(-100), 'hist:D1': sec(-100), 'hist:D2': sec(-100), 'hist:C1': sec(-100), search: sec(-100) }
+    return st
+  }
+  const fill = (slack: FakeSlack) => {
+    slack.listDms = async () => [{ id: 'D1', type: 'im' as const }, { id: 'D2', type: 'im' as const }] as never
+    slack.hist = { D1: [{ ts: sec(-50), user: 'U2', text: 'первый' }], D2: [{ ts: sec(-40), user: 'U3', text: 'второй' }] }
+  }
+  const state = seed()
+  const real = (st: State) => (slack: FakeSlack, cfg: Config) => { fill(slack); return new Collector(slack as never, cfg, st, '/tmp/ping-assistant-test/files') }
+  const e = await setup({}, state, real(state))
+  const before = structuredClone(state.cursors)
+  let calls = 0
+  const orig = items.ingest
+  const spy = spyOn(items, 'ingest').mockImplementation((...a: Parameters<typeof orig>) => {
+    if (++calls === 2) throw new Error('disk full')
+    return orig(...a)
+  })
+  let savedMidTick: State | undefined
+  e.slack.channelName = async (id: string) => { savedMidTick ??= structuredClone(state); return `name-${id}` }
+  try {
+    await e.orch.tick()
+  } finally {
+    spy.mockRestore()
+  }
+  expect(state.cursors).toEqual(before) // nothing committed
+  expect(savedMidTick!.cursors).toEqual(before) // a save racing the tick holds the old cursors too
+  expect(Object.values(state.items).map((i) => i.messages[0]!.text)).toEqual(['первый'])
+
+  // Restart from the persisted state: the second message is collected again, the first is deduped.
+  e.orch.stop()
+  const restarted = structuredClone(state)
+  const e2 = await setup({}, restarted, real(restarted))
+  await e2.orch.tick()
+  expect(Object.values(restarted.items).map((i) => i.messages[0]!.text)).toEqual(['первый', 'второй'])
+  expect(restarted.cursors['hist:D2']).toBe(sec(-40))
+  expect(restarted.cursors.lastTick).toBe(`${T0 / 1000}.000000`)
+})
+
+test('idle() waits for the in-flight tick', async () => {
+  const e = await setup()
+  let release!: () => void
+  e.collector.tick = () => new Promise<TickResult>((r) => { release = () => r({ collected: [], cursorUpdates: { lastTick: '5.0' }, removeCursors: [] }) })
+  const ticking = e.orch.tick()
+  let idle = false
+  const waiting = e.orch.idle().then(() => { idle = true })
+  await e.flush()
+  expect(idle).toBe(false)
+  release()
+  await ticking
+  await waiting
+  expect(idle).toBe(true)
+  expect(e.state.cursors.lastTick).toBe('5.0')
 })

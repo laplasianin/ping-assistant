@@ -5,6 +5,12 @@ import type { ItemSource, SlackMsg, State } from '../state'
 import type { RawMsg, SlackClient } from './client'
 
 export type Collected = { msg: SlackMsg; source: ItemSource }
+/**
+ * One tick's output. The collector never writes state.cursors itself: the caller applies
+ * cursorUpdates (and removes removeCursors) only after every collected message is ingested,
+ * so a crash or restart mid-tick replays the messages instead of skipping them.
+ */
+export type TickResult = { collected: Collected[]; cursorUpdates: Record<string, string>; removeCursors: string[] }
 
 const SKIP_SUBTYPES = new Set(['message_changed', 'message_deleted', 'channel_join', 'channel_leave', 'bot_message', 'channel_topic', 'channel_purpose'])
 const DAY_MS = 86_400_000
@@ -23,6 +29,15 @@ const log = (source: string, err: unknown): void => {
 
 type Read = { raws: RawMsg[]; cursors: Record<string, string>; remove?: string[] }
 
+/** Commits a tick's cursors; a cursor never moves backwards (the orchestrator may have advanced it meanwhile). */
+export function applyCursors(state: State, r: Pick<TickResult, 'cursorUpdates' | 'removeCursors'>): void {
+  for (const k of r.removeCursors) delete state.cursors[k]
+  for (const [k, v] of Object.entries(r.cursorUpdates)) {
+    const cur = state.cursors[k]
+    if (!cur || cmpTs(v, cur) > 0) state.cursors[k] = v
+  }
+}
+
 export class Collector {
   constructor(
     private readonly slack: SlackClient,
@@ -31,11 +46,12 @@ export class Collector {
     private readonly filesDir: string,
   ) {}
 
-  async tick(now: number): Promise<Collected[]> {
+  async tick(now: number): Promise<TickResult> {
     const nowTs = `${Math.floor(now / 1000)}.000000`
     const out: Collected[] = []
     const seen = new Set<string>()
-    this.expireWatched(now)
+    const cursorUpdates: Record<string, string> = {}
+    const removeCursors = this.expireWatched(now)
 
     const run = async (name: string, source: ItemSource, read: () => Promise<Read>): Promise<void> => {
       try {
@@ -51,8 +67,8 @@ export class Collector {
         }
         for (const k of local) seen.add(k)
         out.push(...built)
-        Object.assign(this.state.cursors, cursors)
-        for (const k of remove ?? []) delete this.state.cursors[k]
+        Object.assign(cursorUpdates, cursors)
+        removeCursors.push(...(remove ?? []))
       } catch (err) {
         log(name, err)
       }
@@ -71,20 +87,22 @@ export class Collector {
       await run(`thread ${key}`, 'followup', () => this.readThread(channel, threadTs, nowTs))
     }
 
-    this.state.cursors.lastTick = nowTs
-    return out.sort((a, b) => cmpTs(a.msg.ts, b.msg.ts))
+    cursorUpdates.lastTick = nowTs
+    return { collected: out.sort((a, b) => cmpTs(a.msg.ts, b.msg.ts)), cursorUpdates, removeCursors }
   }
 
   /** Drops watched threads whose follow-up window has passed, along with the cursor nobody else will track. */
-  private expireWatched(now: number): void {
+  private expireWatched(now: number): string[] {
+    const remove: string[] = []
     const horizon = `${Math.floor((now - this.cfg.followUpDays * DAY_MS) / 1000)}.000000`
     for (const [key, { until }] of Object.entries(this.state.watchedThreads)) {
       if (until >= now) continue
       delete this.state.watchedThreads[key]
       const i = key.lastIndexOf(':')
       const [channel, threadTs] = [key.slice(0, i), key.slice(i + 1)]
-      if (cmpTs(threadTs, horizon) < 0 || !this.cfg.watchChannels.includes(channel)) delete this.state.cursors[`thr:${key}`]
+      if (cmpTs(threadTs, horizon) < 0 || !this.cfg.watchChannels.includes(channel)) remove.push(`thr:${key}`)
     }
+    return remove
   }
 
   private async listDms(): Promise<{ id: string; type: 'im' | 'mpim' }[]> {

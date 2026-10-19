@@ -6,7 +6,7 @@ import type { Config } from './config'
 import { chunk, outcome, renderItem, renderProposal, renderThreadChanged, renderUpdate, slackify, type Keyboard } from './format'
 import { ingest, mature } from './items'
 import type { RawMsg, SlackClient } from './slack/client'
-import { cmpTs, type Collector } from './slack/collector'
+import { applyCursors, cmpTs, type Collector } from './slack/collector'
 import type { Item, ItemStatus, SlackMsg, State, StateStore } from './state'
 import type { Inbound, TelegramBot } from './telegram/bot'
 
@@ -44,7 +44,7 @@ function itemJson(item: Item) {
 export class Orchestrator {
   private readonly now: () => number
   private timer: ReturnType<typeof setInterval> | undefined
-  private ticking = false
+  private ticking: Promise<void> | undefined
 
   constructor(private readonly d: OrchestratorDeps) {
     this.now = d.now ?? Date.now
@@ -65,13 +65,23 @@ export class Orchestrator {
     this.timer = undefined
   }
 
+  /** Resolves when no tick is running; shutdown awaits it before the final save. */
+  async idle(): Promise<void> {
+    await this.ticking
+  }
+
   async tick(): Promise<void> {
     if (this.ticking) return
-    this.ticking = true
+    this.ticking = this.runTick().finally(() => { this.ticking = undefined })
+    return this.ticking
+  }
+
+  private async runTick(): Promise<void> {
     const { state, cfg, collector } = this.d
     try {
       const now = this.now()
-      for (const { msg, source } of await collector.tick(now)) {
+      const batch = await collector.tick(now)
+      for (const { msg, source } of batch.collected) {
         const ev = ingest(state, msg, source, now, cfg)
         if (ev.kind === 'dropped') continue
         log(`event ${ev.kind}`)
@@ -82,12 +92,13 @@ export class Orchestrator {
           }
         })
       }
+      // Only now: every collected message is in msgIndex, so a restart from these cursors loses nothing.
+      applyCursors(state, batch)
       for (const item of mature(state, now, cfg)) await this.deliver(item)
     } catch (err) {
       log(`tick failed: ${errName(err)}`)
     } finally {
       this.save()
-      this.ticking = false
     }
   }
 

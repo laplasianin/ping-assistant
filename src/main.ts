@@ -39,6 +39,8 @@ async function shutdown(): Promise<void> {
   shuttingDown = true
   log('shutting down')
   orchestrator.stop()
+  // A tick commits its cursors only at its end: let it finish, so the final save holds them (bounded: Slack calls time out at 30s).
+  await Promise.race([orchestrator.idle(), new Promise((r) => setTimeout(r, 40_000).unref())])
   try { await tg.stop() } catch {}
   try { store.save(state) } catch (err) { log(`state save failed: ${err instanceof Error ? err.name : 'unknown'}`) }
   process.exit(0)

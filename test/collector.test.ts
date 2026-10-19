@@ -1,5 +1,5 @@
 import { test, expect, afterEach, beforeEach, spyOn } from 'bun:test'
-import { Collector } from '../src/slack/collector'
+import { applyCursors, Collector } from '../src/slack/collector'
 import type { RawMsg, SlackClient } from '../src/slack/client'
 import { emptyState } from '../src/state'
 import type { Config } from '../src/config'
@@ -36,7 +36,12 @@ const cfg = { userId: 'ME', watchChannels: ['C1'], followUpDays: 7 } as Config
 let slack: FakeSlack
 let state: ReturnType<typeof emptyState>
 let stderr: ReturnType<typeof spyOn>
-const make = () => new Collector(slack as unknown as SlackClient, cfg, state, '/tmp/ping-assistant-files-test')
+const collector = () => new Collector(slack as unknown as SlackClient, cfg, state, '/tmp/ping-assistant-files-test')
+/** Ticks and commits the cursors the way the orchestrator does after a successful ingest. */
+const make = () => {
+  const c = collector()
+  return { tick: async (now: number) => { const r = await c.tick(now); applyCursors(state, r); return r.collected } }
+}
 
 beforeEach(() => {
   slack = new FakeSlack()
@@ -245,4 +250,23 @@ test('expired watched channel thread keeps its cursor until it is older than the
   expect(state.cursors[`thr:C1:${recent}`]).toBe(recent) // still a normal tracked channel thread
   await make().tick(NOW + 6 * 86400_000)
   expect(state.cursors[`thr:C1:${recent}`]).toBeUndefined()
+})
+
+test('tick stages cursor updates instead of writing state.cursors', async () => {
+  slack.dms = [{ id: 'D1', type: 'im' }]
+  state.cursors = { 'hist:D1': '100.000000', 'hist:C1': '100.000000', search: '1.0', 'thr:C2:5.0': '5.0' }
+  state.watchedThreads['C2:5.0'] = { until: NOW - 1 }
+  slack.hist = { D1: [{ ts: '101.5', user: 'U2', text: 'hi' }] }
+  const before = structuredClone(state.cursors)
+  const r = await collector().tick(NOW)
+  expect(state.cursors).toEqual(before)
+  expect(r.collected.map((o) => o.msg.ts)).toEqual(['101.5'])
+  expect(r.cursorUpdates).toMatchObject({ 'hist:D1': '101.5', lastTick: NOW_TS })
+  expect(r.removeCursors).toEqual(['thr:C2:5.0'])
+})
+
+test('applyCursors never moves a cursor backwards', () => {
+  state.cursors = { 'thr:C1:1.0': '9000.000100', gone: '1.0' }
+  applyCursors(state, { cursorUpdates: { 'thr:C1:1.0': '50.0', 'hist:D1': '2.0' }, removeCursors: ['gone'] })
+  expect(state.cursors).toEqual({ 'thr:C1:1.0': '9000.000100', 'hist:D1': '2.0' })
 })
