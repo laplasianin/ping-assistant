@@ -51,7 +51,8 @@ export function renderItem(
   const link = item.messages[0]?.permalink
   if (link) parts.push(link)
   if (item.analysis) parts.push(item.analysis)
-  if (variants.length) parts.push(`Варианты:\n${variants.map((v, i) => `${i + 1}. ${v}`).join('\n')}`)
+  // Shown exactly as «N k» will send it (sendToSlack posts slackify(variant)).
+  if (variants.length) parts.push(`Варианты:\n${variants.map((v, i) => `${i + 1}. ${slackify(v)}`).join('\n')}`)
   parts.push(`Ответь: «${item.id} 1» · «${item.id} 2, но …» · «${item.id}: свой текст» · «${item.id} пропустить»`)
   const keyboard: Keyboard = [[
     ...variants.map((_, i) => ({ label: String(i + 1), data: callbackData({ kind: 'choose', itemId: item.id, n: i + 1 }) })),

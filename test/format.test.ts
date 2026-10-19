@@ -24,6 +24,13 @@ describe('humanizeSlack', () => {
 })
 
 describe('renderItem', () => {
+  test('variants are shown exactly as they will be sent (slackified)', () => {
+    const v = 'Смотри **тут** и **там**'
+    const { text } = renderItem(item({ variants: [v] }), {}, {}, NOW)
+    expect(text).toContain(`Варианты:\n1. ${slackify(v)}`)
+    expect(text).not.toContain('**')
+  })
+
   test('header has id, channel, author, age and N+1 buttons', () => {
     const { text, keyboard } = renderItem(item(), { U2: 'Bob' }, {}, NOW)
     expect(text.startsWith('#14 · #pathfinders · Max Darski · 5 мин назад')).toBe(true)

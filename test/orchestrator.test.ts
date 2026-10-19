@@ -832,3 +832,35 @@ test('an addendum during triage joins the item: session gets kind=update, Telegr
   expect(e.notes.map((n) => n.meta)).toEqual([{ kind: 'update', item_id: '1', source: 'ping-assistant' }])
   expect(e.api.sent).toEqual([])
 })
+
+test('a failed postMessage leaves the item awaiting, unwatched, and says so', async () => {
+  const e = await setup()
+  await matureThreadItem(e)
+  const sent = await propose(e, ['a', 'b'])
+  e.slack.postMessage = async () => { throw new Error('slack chat.postMessage: not_in_channel') }
+  await e.callback('pa:choose:1:1', sent.id)
+
+  const item = e.state.items['1']!
+  expect(item.status).toBe('awaiting')
+  expect(item.sentTs).toBeUndefined()
+  expect(e.state.watchedThreads).toEqual({})
+  expect(e.api.last().text).toBe('#1: не удалось отправить в Slack (slack chat.postMessage: not_in_channel)')
+  expect(e.api.lastEdit(sent.id)).toBeUndefined() // buttons still live: Ilya can retry
+})
+
+test('a top-level IM item is answered as a plain message: no thread, no watch', async () => {
+  const e = await setup()
+  e.collector.queue.push({ msg: { channel: 'D1', ts: '105.000000', user: 'U2', text: 'Есть минутка?' }, source: 'im' })
+  await e.orch.tick()
+  e.advance(91_000)
+  await e.orch.tick()
+  await e.flush()
+  const sent = await propose(e, ['Да, звони'])
+  await e.callback('pa:choose:1:1', sent.id)
+
+  expect(e.slack.posted).toEqual([{ channel: 'D1', text: 'Да, звони' }])
+  expect(e.state.items['1']!.status).toBe('sent')
+  expect(e.state.items['1']!.threadTs).toBeUndefined()
+  expect(e.state.watchedThreads).toEqual({})
+  expect(Object.keys(e.state.cursors).filter((k) => k.startsWith('thr:'))).toEqual([])
+})

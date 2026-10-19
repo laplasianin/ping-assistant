@@ -72,3 +72,11 @@ test('loadSecrets tolerates a missing file when env has both keys', () => {
   process.env.TELEGRAM_BOT_TOKEN = 't'
   expect(loadSecrets(join(tmp(), 'nope.env'))).toEqual({ slackToken: 's', telegramToken: 't' })
 })
+
+test('loadSecrets strips matching quotes and a leading export', () => {
+  const p = join(tmp(), '.env')
+  writeFileSync(p, `export SLACK_USER_TOKEN="xoxp-quoted"\nTELEGRAM_BOT_TOKEN='tg-single'\n`)
+  expect(loadSecrets(p)).toEqual({ slackToken: 'xoxp-quoted', telegramToken: 'tg-single' })
+  writeFileSync(p, `SLACK_USER_TOKEN="xoxp-unbalanced\nTELEGRAM_BOT_TOKEN=tg'mid'\n`)
+  expect(loadSecrets(p)).toEqual({ slackToken: '"xoxp-unbalanced', telegramToken: "tg'mid'" })
+})

@@ -45,11 +45,13 @@ function parseEnvFile(path: string): Record<string, string> {
   if (!existsSync(path)) return {}
   const out: Record<string, string> = {}
   for (const line of readFileSync(path, 'utf8').split(/\r?\n/)) {
-    const trimmed = line.trim()
+    const trimmed = line.trim().replace(/^export\s+/, '') // shell-style `export KEY=value`
     if (!trimmed || trimmed.startsWith('#')) continue
     const eq = trimmed.indexOf('=')
     if (eq < 0) continue
-    out[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim()
+    const value = trimmed.slice(eq + 1).trim()
+    const quoted = value.length >= 2 && (value[0] === '"' || value[0] === "'") && value.at(-1) === value[0]
+    out[trimmed.slice(0, eq).trim()] = quoted ? value.slice(1, -1) : value
   }
   return out
 }
