@@ -11,7 +11,8 @@
 # --add-dir: file tools (Read/Grep/Glob) only see the session cwd plus added dirs; without this the
 #   research subagent could not read the Scentbird repo named in ping-assistant.config.json.
 cd "$(dirname "$0")/.." || exit 1
-REPO=$(bun -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("ping-assistant.config.json","utf8")).scentbirdRepoPath)')
+REPO=$(bun -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("ping-assistant.config.json","utf8")).scentbirdRepoPath)') || exit 1
+[ -n "$REPO" ] || { echo "ping-assistant-up: scentbirdRepoPath missing in ping-assistant.config.json" >&2; exit 1; }
 exec caffeinate -i claude \
   --setting-sources project --permission-mode dontAsk \
   --model "${PING_ASSISTANT_MODEL:-claude-sonnet-5-5}" \
