@@ -1066,3 +1066,26 @@ test('socket mode: once the socket gives up, the timer switches from drainSecond
     e.orch.stop()
   } finally { setSpy.mockRestore(); clearSpy.mockRestore() }
 })
+
+test('the orchestrator prunes old closed items at most once an hour and saves after pruning', async () => {
+  const state = emptyState()
+  const at = T0 - 8 * 86_400_000
+  state.items['3'] = {
+    id: '3', seq: 3, sub: 0, status: 'skipped', source: 'im', channel: 'D1', author: 'U2', messages: [], context: [],
+    lastSeenTs: '1.0', createdAt: at, lastMessageAt: at, telegram: {},
+  }
+  state.msgIndex['D1:1.000000'] = '3'
+  const e = await setup({}, state)
+  await e.orch.tick()
+  expect(state.items['3']).toBeUndefined()
+  expect(state.msgIndex).toEqual({})
+  state.items['4'] = { id: '4', seq: 4, sub: 0, status: 'ignored', source: 'im', channel: 'D1', author: 'U2', messages: [], context: [], lastSeenTs: '1.0', createdAt: at, lastMessageAt: at, telegram: {} }
+  e.advance(30 * 60_000)
+  await e.orch.tick()
+  expect(state.items['4']).toBeDefined() // less than an hour since the last prune
+  const saves = e.saves()
+  e.advance(30 * 60_000)
+  await e.orch.tick()
+  expect(state.items['4']).toBeUndefined()
+  expect(e.saves()).toBe(saves + 1)
+})

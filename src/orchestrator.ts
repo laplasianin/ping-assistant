@@ -5,7 +5,7 @@ import { callbackData, type Command } from './commands'
 import type { Config } from './config'
 import { outcome, renderItem, renderProposal, renderThreadChanged, renderUpdate, slackify, type Keyboard } from './format'
 import { ItemMessages, itemJson, lastPart, msgJson, withoutHint } from './item-messages'
-import { ingest, mature } from './items'
+import { ingest, mature, prune } from './items'
 import type { RawMsg, SlackClient } from './slack/client'
 import { applyCursors, cmpTs, type Collector } from './slack/collector'
 import type { SlackSocket } from './slack/socket'
@@ -25,6 +25,8 @@ const SOCKET_SILENCE_MS = 10 * 60_000
 /** A tick that changed nothing saves at most this often. */
 const IDLE_SAVE_MS = 60_000
 const DAY_MS = 86_400_000
+/** Old closed items and index entries are pruned at most this often. */
+const PRUNE_MS = 3_600_000
 
 const log = (kind: string): void => { process.stderr.write(`ping-assistant: ${kind}\n`) }
 const errName = (err: unknown): string => (err instanceof Error ? err.name : 'unknown')
@@ -38,6 +40,7 @@ export class Orchestrator {
   private lastSave: number | undefined
   /** The socket gave up for good: ticks run every pollSeconds, as without Socket Mode. */
   private pollingOnly = false
+  private lastPrune: number | undefined
 
   constructor(private readonly d: OrchestratorDeps) {
     this.now = d.now ?? Date.now
@@ -118,6 +121,10 @@ export class Orchestrator {
       if (ripe.length) dirty = true
       for (const item of ripe) await this.deliver(item)
       if (await this.triageWatchdog(now)) dirty = true
+      if (this.lastPrune === undefined || now - this.lastPrune >= PRUNE_MS) {
+        this.lastPrune = now
+        if (prune(state, now, cfg)) dirty = true
+      }
     } catch (err) {
       dirty = true
       log(`tick failed: ${errName(err)}`)

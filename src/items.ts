@@ -1,6 +1,6 @@
 import type { Config } from './config'
 import { cmpTs } from './slack/collector'
-import { OWN_MSG, type Item, type ItemSource, type SlackMsg, type State } from './state'
+import { OWN_MSG, type Item, type ItemSource, type ItemStatus, type SlackMsg, type State } from './state'
 
 export function conversationKey(m: SlackMsg): string {
   return `${m.channel}:${m.threadTs ?? ''}`
@@ -102,6 +102,33 @@ export function ingest(state: State, m: SlackMsg, source: ItemSource, now: numbe
   const id = nextItemId(state)
   const item = newItem(state, m, source, now, id, Number(id), 0)
   return { kind: 'buffered', itemId: item.id }
+}
+
+const TERMINAL: ItemStatus[] = ['ignored', 'skipped', 'sent', 'answered_manually']
+const DAY_MS = 86_400_000
+
+/**
+ * Bounds state growth. Drops items in a terminal status whose last activity is older than followUpDays
+ * (unless their thread is still watched: a follow-up needs its parent) with their msgIndex entries, and any
+ * msgIndex entry older than followUpDays that no remaining item refers to (own-message sentinels included).
+ * Open items (settling, triage, awaiting) are never touched. Returns whether anything was removed.
+ */
+export function prune(state: State, now: number, cfg: Config): boolean {
+  const cutoff = now - cfg.followUpDays * DAY_MS
+  const pruned = new Set<string>()
+  for (const item of Object.values(state.items)) {
+    if (!TERMINAL.includes(item.status) || Math.max(item.createdAt, item.lastMessageAt) >= cutoff) continue
+    const watch = item.threadTs ? state.watchedThreads[`${item.channel}:${item.threadTs}`] : undefined
+    if (watch && watch.until > now) continue
+    delete state.items[item.id]
+    pruned.add(item.id)
+  }
+  let removed = 0
+  for (const [key, value] of Object.entries(state.msgIndex)) {
+    const old = Number(key.slice(key.lastIndexOf(':') + 1)) * 1000 < cutoff
+    if (pruned.has(value) || (old && (value === OWN_MSG || !state.items[value]))) { delete state.msgIndex[key]; removed++ }
+  }
+  return pruned.size > 0 || removed > 0
 }
 
 export function mature(state: State, now: number, cfg: Config): Item[] {

@@ -2,7 +2,7 @@ import { test, expect, afterEach } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ingest, mature, nextItemId, conversationKey } from '../src/items'
+import { ingest, mature, nextItemId, conversationKey, prune } from '../src/items'
 import { emptyState, StateStore, type Item, type SlackMsg } from '../src/state'
 import type { Config } from '../src/config'
 
@@ -268,4 +268,32 @@ test('a late, older message is inserted in ts order; lastSeenTs stays the newest
   const item = Object.values(s.items)[0]!
   expect(item.messages.map((m) => m.ts)).toEqual([a.ts, b.ts, c.ts])
   expect(item.lastSeenTs).toBe(c.ts)
+})
+
+test('prune drops closed items older than followUpDays with their msgIndex entries, and old index entries; never open items', () => {
+  const DAY = 86_400_000
+  const now = T0 + 30 * DAY
+  const old = now - 8 * DAY
+  const recent = now - 2 * DAY
+  const sec = (ms: number) => `${ms / 1000}.000100`
+  const s = emptyState()
+  const add = (id: string, status: Item['status'], at: number) => {
+    s.items[id] = seeded({ id, seq: Number(id), status, channel: 'D1', threadTs: undefined, createdAt: at, lastMessageAt: at })
+    s.msgIndex[`D1:${sec(at)}${id}`] = id
+  }
+  for (const [id, status] of [['1', 'ignored'], ['2', 'skipped'], ['3', 'sent'], ['4', 'answered_manually']] as const) add(id, status, old)
+  for (const [id, status] of [['5', 'awaiting'], ['6', 'settling'], ['7', 'triage']] as const) add(id, status, old)
+  add('8', 'sent', recent)
+  // A sent item in a thread still under watch is kept: a follow-up there needs its parent.
+  s.items['9'] = seeded({ id: '9', seq: 9, status: 'sent', channel: 'C1', threadTs: '100.1', createdAt: old, lastMessageAt: old })
+  s.watchedThreads['C1:100.1'] = { until: now + DAY }
+  s.msgIndex[`D2:${sec(old)}`] = 'own'
+  s.msgIndex[`D2:${sec(recent)}`] = 'own'
+  s.msgIndex[`D3:${sec(old)}`] = 'gone' // an item that no longer exists
+
+  expect(prune(s, now, cfg)).toBe(true)
+  expect(Object.keys(s.items).sort()).toEqual(['5', '6', '7', '8', '9'])
+  expect(Object.values(s.msgIndex).sort()).toEqual(['5', '6', '7', '8', 'own'])
+  expect(s.msgIndex[`D2:${sec(recent)}`]).toBe('own')
+  expect(prune(s, now, cfg)).toBe(false) // nothing left to prune
 })
