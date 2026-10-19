@@ -1,52 +1,46 @@
-// Temporary spike: proves the Claude Code channel protocol end to end.
-// Replaced by the real server in later tasks.
-import { Server } from '@modelcontextprotocol/sdk/server/index.js'
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
+// Ping Assistant entry point: one process = MCP channel server + Slack poller + Telegram bot.
+// Logs carry event kinds only, never message text.
+import { dirname, join } from 'node:path'
+import { Channel } from './channel'
+import { loadConfig, loadSecrets } from './config'
+import { Orchestrator } from './orchestrator'
+import { SlackClient } from './slack/client'
+import { Collector } from './slack/collector'
+import { StateStore } from './state'
+import { TelegramBot } from './telegram/bot'
 
-const mcp = new Server(
-  { name: 'ping-assistant', version: '0.1.0' },
-  {
-    capabilities: { tools: {}, experimental: { 'claude/channel': {} } },
-    instructions:
-      'Spike server. Every 20 seconds a <channel source="ping-assistant" kind="tick"> message arrives. Call the ping tool to check connectivity; it returns "pong".',
-  },
-)
+const log = (kind: string): void => { process.stderr.write(`ping-assistant: ${kind}\n`) }
 
-mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
-    {
-      name: 'ping',
-      description: 'Connectivity check. Returns "pong".',
-      inputSchema: { type: 'object', properties: {} },
-    },
-  ],
-}))
+const cfg = loadConfig(process.env.PING_ASSISTANT_CONFIG ?? join(import.meta.dir, '..', 'ping-assistant.config.json'))
+const secrets = loadSecrets()
+const store = new StateStore(cfg.statePath)
+const state = store.load()
+const slack = new SlackClient(secrets.slackToken)
+const collector = new Collector(slack, cfg, state, join(dirname(cfg.statePath), 'files'))
+const tg = new TelegramBot(secrets.telegramToken, cfg.telegramChatId)
 
-mcp.setRequestHandler(CallToolRequestSchema, async req => {
-  if (req.params.name === 'ping') return { content: [{ type: 'text', text: 'pong' }] }
-  return { content: [{ type: 'text', text: `unknown tool: ${req.params.name}` }], isError: true }
+// The channel needs the orchestrator's handlers and the orchestrator needs channel.notify.
+let channel: Channel | undefined
+const orchestrator = new Orchestrator({
+  cfg, store, state, slack, collector, tg,
+  channel: { notify: (content, meta) => channel!.notify(content, meta) },
 })
+channel = new Channel(orchestrator.handlers())
 
-await mcp.connect(new StdioServerTransport())
-
-const TICK_MS = Number(process.env.PING_TICK_MS ?? 20_000)
-const tick = setInterval(() => {
-  mcp
-    .notification({
-      method: 'notifications/claude/channel',
-      params: { content: 'tick', meta: { source: 'ping-assistant', kind: 'tick' } },
-    })
-    .catch(err => process.stderr.write(`ping-assistant: tick failed: ${err}\n`))
-}, TICK_MS)
+await channel.connect()
+orchestrator.start()
+log(`started${cfg.dryRun ? ' (dry-run)' : ''}, polling every ${cfg.pollSeconds}s`)
+tg.start().catch((err) => log(`telegram stopped: ${err instanceof Error ? err.name : 'unknown'}`))
 
 // Claude Code closing the connection EOFs stdin; exit instead of lingering as a zombie.
 let shuttingDown = false
-function shutdown(): void {
+async function shutdown(): Promise<void> {
   if (shuttingDown) return
   shuttingDown = true
-  clearInterval(tick)
-  process.stderr.write('ping-assistant: shutting down\n')
+  log('shutting down')
+  orchestrator.stop()
+  try { await tg.stop() } catch {}
+  try { store.save(state) } catch (err) { log(`state save failed: ${err instanceof Error ? err.name : 'unknown'}`) }
   process.exit(0)
 }
 process.stdin.on('end', shutdown)
@@ -57,5 +51,5 @@ process.on('SIGHUP', shutdown)
 
 // Orphan watchdog: belt and braces for the stdin handlers above.
 setInterval(() => {
-  if (process.stdin.destroyed || process.stdin.readableEnded) shutdown()
+  if (process.stdin.destroyed || process.stdin.readableEnded) void shutdown()
 }, 5000).unref()
