@@ -3,8 +3,11 @@ import type { ItemSource, State } from '../state'
 import type { RawMsg } from './client'
 import type { ChannelType } from './socket'
 
-export type Queued = { raw: RawMsg & { channel: string }; channelType: ChannelType }
+export type Queued = { raw: RawMsg & { channel: string }; channelType: ChannelType; epoch?: number }
 
+const escape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+/** `<@U123>` or `<@U123|name>`. */
+const mentions = (text: string, userId: string): boolean => new RegExp(`<@${escape(userId)}(\\|[^>]*)?>`).test(text)
 const isReply = (raw: RawMsg): boolean => raw.thread_ts !== undefined && raw.thread_ts !== raw.ts
 
 /**
@@ -23,6 +26,8 @@ export class SocketQueue {
    * cursor and the socket message was missed. Any other cursor keeps waiting for the poll.
    */
   private polled = new Map<string, string>()
+  /** The socket connection (SlackSocket.epoch()) the polled entries belong to. */
+  private epochNo: number | undefined
 
   get connected(): boolean { return this.up }
   set connected(v: boolean) {
@@ -31,8 +36,19 @@ export class SocketQueue {
     this.up = v
   }
 
-  push(raw: RawMsg & { channel: string }, channelType: ChannelType): void {
-    this.pending.push({ raw, channelType })
+  push(raw: RawMsg & { channel: string; epoch?: number }, channelType: ChannelType): void {
+    this.pending.push({ raw, channelType, ...(raw.epoch !== undefined ? { epoch: raw.epoch } : {}) })
+  }
+
+  /**
+   * A different connection epoch, seen at tick start or on an event, means a reconnect happened (possibly
+   * between two ticks, unseen by `connected`): the gap may hide messages, so poll now and trust no cursor yet.
+   */
+  noteEpoch(e: number): void {
+    if (e === this.epochNo) return
+    this.reconnected = true
+    this.polled.clear()
+    this.epochNo = e
   }
 
   take(): Queued[] {
@@ -59,8 +75,9 @@ export class SocketQueue {
   source(q: Queued, cfg: Config, state: State): ItemSource | undefined {
     const { raw, channelType } = q
     if (channelType === 'im' || channelType === 'mpim') return channelType
+    // A direct mention is a mention even in a watch channel, as the search would label it.
+    if (mentions(raw.text, cfg.userId)) return 'mention'
     if (cfg.watchChannels.includes(raw.channel)) return 'channel'
-    if (raw.text.includes(`<@${cfg.userId}>`)) return 'mention'
     if (raw.thread_ts && state.watchedThreads[`${raw.channel}:${raw.thread_ts}`]) return 'followup'
     return undefined
   }

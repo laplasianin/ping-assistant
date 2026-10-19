@@ -14,9 +14,9 @@ import type { Inbound, TelegramBot } from './telegram/bot'
 
 export type OrchestratorDeps = {
   cfg: Config; store: Pick<StateStore, 'save'>; state: State; slack: SlackClient;
-  collector: Pick<Collector, 'tick'> & Partial<Pick<Collector, 'socketConnected'>>; tg: TelegramBot; channel: Pick<Channel, 'notify'>; now?: () => number
+  collector: Pick<Collector, 'tick'> & Partial<Pick<Collector, 'socketConnected' | 'socketEpoch'>>; tg: TelegramBot; channel: Pick<Channel, 'notify'>; now?: () => number
   /** Socket Mode: ticks every drainSeconds and mostly drain the socket queue; polling reconciles every socketReconcileTicks. */
-  socket?: Pick<SlackSocket, 'isConnected'>
+  socket?: Pick<SlackSocket, 'isConnected' | 'epoch'>
 }
 
 const CLOSED: ItemStatus[] = ['sent', 'skipped', 'answered_manually']
@@ -72,7 +72,10 @@ export class Orchestrator {
     const { state, cfg, collector } = this.d
     try {
       const now = this.now()
-      if (this.d.socket) collector.socketConnected = this.d.socket.isConnected() // down: poll every tick
+      if (this.d.socket) {
+        collector.socketConnected = this.d.socket.isConnected() // down: poll every tick
+        collector.socketEpoch = this.d.socket.epoch() // a reconnect since the last tick: poll, trust no cursor
+      }
       const batch = await collector.tick(now)
       for (const { msg, source } of batch.collected) {
         const ev = ingest(state, msg, source, now, cfg)

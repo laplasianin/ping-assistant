@@ -118,7 +118,7 @@ test('watched channel thread replies are fetched', async () => {
   expect(state.cursors['hist:C1']).toBe('150.0')
 })
 
-test('subtypes message_changed/channel_join/bot_message are skipped; thread_broadcast kept', async () => {
+test('only message subtypes (none, file_share, thread_broadcast, me_message) are kept; edits, joins, bots, replied markers skipped', async () => {
   slack.dms = [{ id: 'D1', type: 'im' }]
   state.cursors = { 'hist:D1': '1.0', 'hist:C1': '1.0', search: '1.0' }
   slack.hist = {
@@ -129,11 +129,14 @@ test('subtypes message_changed/channel_join/bot_message are skipped; thread_broa
       { ts: '5.0', bot_id: 'B1', user: 'U9', text: 'bot' },
       { ts: '6.0', subtype: 'thread_broadcast', user: 'U2', thread_ts: '1.5', text: 'bc' },
       { ts: '7.0', subtype: 'file_share', user: 'U2', text: 'f' },
+      { ts: '8.0', subtype: 'message_replied', user: 'U2', text: '' },
+      { ts: '9.0', subtype: 'channel_name', user: 'U2', text: 'renamed' },
+      { ts: '10.0', subtype: 'me_message', user: 'U2', text: 'waves' },
     ],
   }
   const out = await make().tick(NOW)
-  expect(out.map((o) => o.msg.ts)).toEqual(['6.0', '7.0'])
-  expect(state.cursors['hist:D1']).toBe('7.0')
+  expect(out.map((o) => o.msg.ts)).toEqual(['6.0', '7.0', '10.0'])
+  expect(state.cursors['hist:D1']).toBe('10.0')
 })
 
 test('failing source keeps its cursor and does not block others', async () => {
@@ -709,4 +712,54 @@ test('socket: while connected, polling runs on the connect tick and then every s
   polls.length = 0
   for (let i = 10; i <= 12; i++) await tick(i)
   expect(polls).toEqual([true, false, false])
+})
+
+test('socket: a reconnect between two ticks (new epoch) stops cursor advances and triggers a poll', async () => {
+  const { c, tick } = await connected()
+  const searches = () => slack.searchArgs.length
+  let before = searches()
+  slack.hist = { C1: [{ ts: at(5), user: 'U2', text: 'a' }] } // Slack has it too
+  c.enqueue({ channel: 'C1', ts: at(5), user: 'U2', text: 'a', epoch: 1 } as never, 'channel')
+  await tick(NOW + 5_000) // first epoch seen: earlier polls no longer count, so this tick polls (after the drain)
+  expect(searches()).toBe(before + 1)
+  expect(state.cursors['hist:C1']).toBe(at(5)) // the poll itself read up to it
+  c.enqueue({ channel: 'C1', ts: at(7), user: 'U2', text: 'b', epoch: 1 } as never, 'channel')
+  await tick(NOW + 8_000)
+  expect(state.cursors['hist:C1']).toBe(at(7)) // same epoch as that poll: advanced
+  before = searches()
+  c.enqueue({ channel: 'C1', ts: at(30), user: 'U2', text: 'c', epoch: 2 } as never, 'channel') // reconnected meanwhile
+  slack.hist = {} // the poll in this tick sees nothing new, so only the socket could move the cursor
+  const r = await tick(NOW + 31_000)
+  expect(r.collected.map((o) => o.msg.ts)).toEqual([at(30)])
+  expect(state.cursors['hist:C1']).toBe(at(7)) // not advanced: the gap before epoch 2 is unread
+  expect(searches()).toBe(before + 1) // and this tick polled to read it
+})
+
+test('socket: socketEpoch set at tick start also invalidates earlier polls', async () => {
+  const { c, tick } = await connected()
+  c.socketEpoch = 1
+  await tick(NOW + 5_000) // the epoch change forces a poll that re-notes the cursors
+  c.enqueue({ channel: 'C1', ts: at(6), user: 'U2', text: 'x', epoch: 1 } as never, 'channel')
+  await tick(NOW + 6_000)
+  expect(state.cursors['hist:C1']).toBe(at(6))
+  c.socketEpoch = 2
+  c.enqueue({ channel: 'C1', ts: at(9), user: 'U2', text: 'y', epoch: 2 } as never, 'channel')
+  await tick(NOW + 10_000)
+  expect(state.cursors['hist:C1']).toBe(at(6))
+})
+
+test('socket: a direct mention in a watch channel is a mention; <@ME|name> counts too', async () => {
+  const { c, tick } = await connected()
+  c.enqueue({ channel: 'C1', ts: at(1), user: 'U2', text: '<@ME> глянь' }, 'channel')
+  c.enqueue({ channel: 'C9', ts: at(2), user: 'U2', text: 'cc <@ME|ilya>' }, 'channel')
+  c.enqueue({ channel: 'C9', ts: at(3), user: 'U2', text: '<@MEX> not me' }, 'channel')
+  const r = await tick(NOW + 10_000)
+  expect(r.collected.map((o) => [o.msg.channel, o.source])).toEqual([['C1', 'mention'], ['C9', 'mention']])
+})
+
+test('socket: a queued message_replied event is not an item', async () => {
+  const { c, tick } = await connected()
+  c.enqueue({ channel: 'D1', ts: at(1), subtype: 'message_replied', user: 'U2', text: '' }, 'im')
+  const r = await tick(NOW + 10_000)
+  expect(r.collected).toEqual([])
 })

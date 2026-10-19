@@ -14,7 +14,8 @@ export type Collected = { msg: SlackMsg; source: ItemSource }
  */
 export type TickResult = { collected: Collected[]; cursorUpdates: Record<string, string>; removeCursors: string[] }
 
-const SKIP_SUBTYPES = new Set(['message_changed', 'message_deleted', 'channel_join', 'channel_leave', 'bot_message', 'channel_topic', 'channel_purpose'])
+/** Subtypes that are someone's new message; everything else (edits, joins, bots, replied markers…) is skipped. */
+const MESSAGE_SUBTYPES = new Set(['', 'file_share', 'thread_broadcast', 'me_message'])
 const DAY_MS = 86_400_000
 /** Quiet MPIMs (no activity in 24h) are read on every MPIM_SWEEP_EVERY-th tick only. */
 const MPIM_SWEEP_EVERY = 10
@@ -69,9 +70,11 @@ export class Collector {
   /** Set from SlackSocket.isConnected(): while true, the polling sources run only every socketReconcileTicks ticks. */
   get socketConnected(): boolean { return this.queue.connected }
   set socketConnected(v: boolean) { this.queue.connected = v }
+  /** Set from SlackSocket.epoch() each tick: a new epoch means a reconnect, so earlier polls no longer vouch for cursors. */
+  set socketEpoch(e: number) { this.queue.noteEpoch(e) }
 
   /** A Socket Mode message event; collected on the next tick. */
-  enqueue(raw: RawMsg & { channel: string }, channelType: ChannelType): void {
+  enqueue(raw: RawMsg & { channel: string; epoch?: number }, channelType: ChannelType): void {
     this.queue.push(raw, channelType)
   }
 
@@ -81,7 +84,7 @@ export class Collector {
     const local = new Map<string, Collected>()
     for (const raw of raws) {
       const key = `${raw.channel}:${raw.ts}`
-      if (SKIP_SUBTYPES.has(raw.subtype ?? '') || raw.bot_id || !raw.channel) continue
+      if (!MESSAGE_SUBTYPES.has(raw.subtype ?? '') || raw.bot_id || !raw.channel) continue
       const earlier = seen.get(key)
       // Mentions are read before DMs: a DM read of the same message decides that it is a DM item.
       if (earlier?.source === 'mention' && (source === 'im' || source === 'mpim')) earlier.source = source
@@ -98,6 +101,7 @@ export class Collector {
   private async drain(seen: Map<string, Collected>, out: Collected[]): Promise<Record<string, string>> {
     const cursors: Record<string, string> = {}
     for (const q of this.queue.take()) {
+      if (q.epoch !== undefined) this.queue.noteEpoch(q.epoch)
       const source = this.queue.source(q, this.cfg, this.state)
       if (!source) continue
       try {

@@ -95,7 +95,7 @@ afterEach(() => { env?.orch.stop(); stderr.mockRestore() })
 async function setup(
   cfgOverrides: Partial<Config> = {}, state: State = emptyState(),
   realCollector?: (slack: FakeSlack, cfg: Config) => Collector,
-  socket?: { isConnected(): boolean },
+  socket?: { isConnected(): boolean; epoch(): number },
 ) {
   const cfg = { ...baseCfg, ...cfgOverrides }
   const slack = new FakeSlack()
@@ -934,7 +934,7 @@ test('socket mode: an enqueued DM becomes an item and, after the settle window, 
   const ts = (sec: number) => `${T0 / 1000 + sec}.000000`
   const state = emptyState()
   let collector!: Collector
-  const sock = { up: true, isConnected() { return this.up } }
+  const sock = { up: true, isConnected() { return this.up }, epoch: () => 1 }
   const intervals: number[] = []
   const spy = spyOn(globalThis, 'setInterval').mockImplementation(((fn: () => void, ms: number) => { intervals.push(ms); return 0 as never }) as never)
   let e: Awaited<ReturnType<typeof setup>>
