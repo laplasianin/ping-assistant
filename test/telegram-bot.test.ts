@@ -1,5 +1,6 @@
 import { test, expect } from 'bun:test'
-import { TelegramBot, type Inbound, type TelegramApi } from '../src/telegram/bot'
+import { GrammyError } from 'grammy'
+import { TelegramBot, isOurProcess, type Inbound, type PollingHooks, type TelegramApi } from '../src/telegram/bot'
 
 const CHAT = '42'
 
@@ -27,9 +28,9 @@ class FakeApi implements TelegramApi {
   }
 }
 
-function setup() {
+function setup(hooks?: PollingHooks) {
   const api = new FakeApi()
-  const bot = new TelegramBot('123:fake', CHAT, api)
+  const bot = new TelegramBot('123:fake', CHAT, api, hooks)
   const inbound: Inbound[] = []
   bot.onInbound(async (i) => { inbound.push(i) })
   return { api, bot, inbound }
@@ -106,4 +107,86 @@ test('edit without keyboard removes reply_markup', async () => {
   const edits = api.of('editMessageText')
   expect(edits[0]?.args).toEqual([CHAT, 5, 'done', { reply_markup: { inline_keyboard: [] } }])
   expect(edits[1]?.args).toEqual([CHAT, 6, 'again', { reply_markup: { inline_keyboard: [[{ text: 'X', callback_data: 'pa:cancel:1' }]] } }])
+})
+
+test('callback from the right chat but wrong sender is rejected', async () => {
+  const { bot, api, inbound } = setup()
+  await bot.ingest(callbackUpdate(20, 42, 99, 'pa:skip:14', 5))
+  expect(inbound).toEqual([])
+  expect(api.calls).toEqual([{ method: 'answerCallbackQuery', args: ['cb20', { text: 'Not authorized' }] }])
+})
+
+test('text from a group chat is dropped', async () => {
+  const { bot, api, inbound } = setup()
+  await bot.ingest(textUpdate(21, -1001234, 42, '14 1'))
+  expect(inbound).toEqual([])
+  expect(api.calls).toEqual([])
+})
+
+test('/start from a wrong sender gets no reply, from the owner gets one', async () => {
+  const { bot, api } = setup()
+  const cmd = (from: number) => ({
+    ...textUpdate(22, 42, from, '/start'),
+  })
+  const wrong = cmd(99)
+  ;(wrong.message as { entities?: unknown }).entities = [{ type: 'bot_command', offset: 0, length: 6 }]
+  await bot.ingest(wrong)
+  expect(api.calls).toEqual([])
+  const own = cmd(42)
+  ;(own.message as { entities?: unknown }).entities = [{ type: 'bot_command', offset: 0, length: 6 }]
+  await bot.ingest(own)
+  expect(api.of('sendMessage')).toHaveLength(1)
+})
+
+test('unparseable callback is answered with the query id and not dispatched', async () => {
+  const { bot, api, inbound } = setup()
+  await bot.ingest(callbackUpdate(23, 42, 42, 'garbage', 5))
+  expect(inbound).toEqual([])
+  expect(api.calls).toEqual([{ method: 'answerCallbackQuery', args: ['cb23', undefined] }])
+})
+
+test('a failing answerCallbackQuery does not drop the command', async () => {
+  const { bot, api, inbound } = setup()
+  api.answerCallbackQuery = async () => { throw new Error('400 query is too old') }
+  await bot.ingest(callbackUpdate(24, 42, 42, 'pa:skip:14', 5))
+  expect(inbound).toEqual([{ cmd: { kind: 'skip', itemId: '14' }, messageId: 5 }])
+})
+
+test('isOurProcess matches only our entry point', () => {
+  const entry = '/Users/me/ping-assistant/src/main.ts'
+  expect(isOurProcess(`bun run ${entry}`, entry)).toBe(true)
+  expect(isOurProcess('bun run /other/project/src/main.ts', entry)).toBe(false)
+  expect(isOurProcess('node something', '')).toBe(false)
+})
+
+const conflict = () => new GrammyError('x', { ok: false, error_code: 409, description: 'Conflict' }, 'getUpdates', {})
+
+test('gives up after 8 consecutive 409s even though onStart fires each time', async () => {
+  let calls = 0
+  const sleeps: number[] = []
+  const { bot } = setup({
+    startPolling: async (onStart) => { calls++; onStart(); throw conflict() },
+    sleep: async (ms) => { sleeps.push(ms) },
+  })
+  await bot.poll()
+  expect(calls).toBe(8)
+  expect(sleeps).toEqual([1000, 2000, 3000, 4000, 5000, 6000, 7000])
+})
+
+test('stop() during backoff prevents another start', async () => {
+  let calls = 0
+  let sleeping!: () => void
+  const entered = new Promise<void>((r) => { sleeping = r })
+  const { bot } = setup({
+    startPolling: async () => { calls++; throw new Error('ETIMEDOUT') },
+    sleep: (_ms, signal) => new Promise((resolve) => {
+      sleeping()
+      signal.addEventListener('abort', () => resolve(), { once: true })
+    }),
+  })
+  const loop = bot.poll()
+  await entered
+  await bot.stop()
+  await loop
+  expect(calls).toBe(1)
 })

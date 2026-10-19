@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { Bot, GrammyError } from 'grammy'
@@ -21,6 +21,14 @@ const STATE_DIR = join(homedir(), '.config', 'ping-assistant')
 const PID_FILE = join(STATE_DIR, 'bot.pid')
 const HELP = 'Ping Assistant: отвечай на вопросы из Slack кнопками или текстом («14 1», «14: свой текст», «14 пропустить»).'
 
+const STABLE_MS = 60_000
+const MAX_CONFLICTS = 8
+
+export type PollingHooks = {
+  startPolling?: (onStart: () => void) => Promise<void>
+  sleep?: (ms: number, signal: AbortSignal) => Promise<void>
+}
+
 const markup = (kb: Keyboard) => ({
   inline_keyboard: kb.map((row) => row.map((b) => ({ text: b.label, callback_data: b.data }))),
 })
@@ -33,12 +41,17 @@ export class TelegramBot {
   private readonly items = new Map<number, string>()
   private handler: (i: Inbound) => Promise<void> = async () => {}
   private stopping = false
+  private abort: AbortController | undefined
+  private readonly startPolling: (onStart: () => void) => Promise<void>
+  private readonly sleep: (ms: number, signal: AbortSignal) => Promise<void>
 
-  constructor(token: string, private readonly chatId: string, api?: TelegramApi) {
+  constructor(token: string, private readonly chatId: string, api?: TelegramApi, hooks: PollingHooks = {}) {
     // With an injected api no network is needed: give grammY fake botInfo so handleUpdate works without init.
     const botInfo = { id: 1, is_bot: true, first_name: 'test', username: 'test_bot', can_join_groups: false, can_read_all_group_messages: false, supports_inline_queries: false, can_connect_to_business: false, has_main_web_app: false, has_topics_enabled: false, allows_users_to_create_topics: false } as unknown as UserFromGetMe
     this.bot = new Bot(token, api ? { botInfo } : {})
     this.api = api ?? (this.bot.api as unknown as TelegramApi)
+    this.startPolling = hooks.startPolling ?? ((onStart) => this.bot.start({ onStart }))
+    this.sleep = hooks.sleep ?? abortableSleep
     this.wire()
   }
 
@@ -105,7 +118,11 @@ export class TelegramBot {
         return
       }
       const cmd = parseCallback(q.data)
-      await this.api.answerCallbackQuery(q.id)
+      try {
+        await this.api.answerCallbackQuery(q.id)
+      } catch (err) {
+        log(`answerCallbackQuery failed: ${err instanceof Error ? err.name : 'unknown'}`) // stale query must not drop the command
+      }
       if (!cmd || !q.message) return
       await this.handler({ cmd, messageId: q.message.message_id })
     })
@@ -115,27 +132,49 @@ export class TelegramBot {
 
   async start(): Promise<void> {
     this.claimPidFile()
+    await this.poll()
+  }
+
+  /** Polling loop with backoff; gives up after 8 consecutive 409s. Exposed for tests (no PID file side effects). */
+  async poll(): Promise<void> {
     this.stopping = false
-    for (let attempt = 1; ; attempt++) {
-      try {
-        await this.bot.start({ onStart: (info) => { attempt = 0; log(`polling as @${info.username}`) } })
-        return
-      } catch (err) {
-        if (this.stopping || (err instanceof Error && err.message === 'Aborted delay')) return
-        const is409 = err instanceof GrammyError && err.error_code === 409
-        if (is409 && attempt >= 8) {
-          log('409 Conflict persists, another poller holds the token; giving up')
+    this.abort = new AbortController()
+    const { signal } = this.abort
+    let failures = 0
+    let conflicts = 0
+    let stable: ReturnType<typeof setTimeout> | undefined
+    try {
+      while (!this.stopping) {
+        try {
+          await this.startPolling(() => {
+            // onStart fires before the first getUpdates, so a 409 can still follow: only forgive after a quiet period.
+            stable = setTimeout(() => { failures = 0; conflicts = 0 }, STABLE_MS)
+            stable.unref?.()
+            log('polling')
+          })
           return
+        } catch (err) {
+          clearTimeout(stable)
+          if (this.stopping) return
+          failures++
+          const is409 = err instanceof GrammyError && err.error_code === 409
+          if (is409 && ++conflicts >= MAX_CONFLICTS) {
+            log('409 Conflict persists, another poller holds the token; giving up')
+            return
+          }
+          const delay = Math.min(1000 * failures, 15_000)
+          log(`${is409 ? '409 Conflict' : 'polling error'}, retrying in ${delay / 1000}s`)
+          await this.sleep(delay, signal)
         }
-        const delay = Math.min(1000 * attempt, 15_000)
-        log(`${is409 ? '409 Conflict' : 'polling error'}, retrying in ${delay / 1000}s`)
-        await new Promise((r) => setTimeout(r, delay))
       }
+    } finally {
+      clearTimeout(stable)
     }
   }
 
   async stop(): Promise<void> {
     this.stopping = true
+    this.abort?.abort()
     await this.bot.stop()
     try {
       if (parseInt(readFileSync(PID_FILE, 'utf8'), 10) === process.pid) rmSync(PID_FILE)
@@ -149,9 +188,8 @@ export class TelegramBot {
       const stale = parseInt(readFileSync(PID_FILE, 'utf8'), 10)
       if (stale > 1 && stale !== process.pid) {
         process.kill(stale, 0)
-        // PIDs get recycled: only terminate if the holder really is our server.
         const cmd = execFileSync('ps', ['-p', String(stale), '-o', 'args='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
-        if (cmd.includes('main.ts') && cmd.includes('bun')) {
+        if (isOurProcess(cmd, entryPath())) {
           log(`replacing stale poller pid=${stale}`)
           process.kill(stale, 'SIGTERM')
         }
@@ -159,4 +197,23 @@ export class TelegramBot {
     } catch {}
     writeFileSync(PID_FILE, String(process.pid))
   }
+}
+
+/** PIDs get recycled: a stale holder is ours only if its command line runs our entry point. */
+export function isOurProcess(cmdline: string, entryPath: string): boolean {
+  return entryPath !== '' && cmdline.includes(entryPath)
+}
+
+function entryPath(): string {
+  const arg = process.argv[1]
+  if (!arg) return ''
+  try { return realpathSync(arg) } catch { return '' }
+}
+
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve()
+    const t = setTimeout(resolve, ms)
+    signal.addEventListener('abort', () => { clearTimeout(t); resolve() }, { once: true })
+  })
 }
