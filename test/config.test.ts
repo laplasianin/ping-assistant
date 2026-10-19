@@ -120,3 +120,17 @@ test('loadSecrets strips trailing comments: unquoted after " #", quoted after th
 test('drainSeconds below 1 is rejected', () => {
   expect(() => loadConfig(writeJson({ ...base, drainSeconds: 0.5 }))).toThrow(/drainSeconds/)
 })
+
+test('loadConfig: a missing file names the path', () => {
+  const p = join(tmp(), 'nope.json')
+  expect(() => loadConfig(p)).toThrow(`Cannot read config ${p}`)
+})
+
+test('loadConfig: malformed JSON names the path and the parse error', () => {
+  const p = join(tmp(), 'bad.json')
+  writeFileSync(p, '{ "userId": "U1", }')
+  let msg = ''
+  try { loadConfig(p) } catch (err) { msg = (err as Error).message }
+  expect(msg).toStartWith(`Invalid config ${p}: malformed JSON (`)
+  expect(msg.length).toBeGreaterThan(`Invalid config ${p}: malformed JSON (`.length + 2)
+})

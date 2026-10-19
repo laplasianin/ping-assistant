@@ -36,7 +36,18 @@ const ConfigSchema = z.object({
 })
 
 export function loadConfig(path = 'ping-assistant.config.json'): Config {
-  const raw: unknown = JSON.parse(readFileSync(expandHome(path), 'utf8'))
+  let text: string
+  try {
+    text = readFileSync(expandHome(path), 'utf8')
+  } catch (err) {
+    throw new Error(`Cannot read config ${path}: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch (err) {
+    throw new Error(`Invalid config ${path}: malformed JSON (${err instanceof Error ? err.message : String(err)})`)
+  }
   const result = ConfigSchema.safeParse(raw)
   if (!result.success) {
     const details = result.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')

@@ -18,6 +18,8 @@ const BUDGETED = new Set(['conversations.history', 'conversations.replies', 'use
 export const DEFAULT_REQUEST_BUDGET = 40
 /** A hung Slack request must not freeze the tick (and with it shutdown's final save). */
 export const DEFAULT_TIMEOUT_MS = 30_000
+/** How much of a non-JSON response body an error quotes. */
+const BODY_SNIPPET = 200
 
 /** Thrown instead of calling Slack once a tick has used its request budget. */
 export class BudgetExceeded extends Error {
@@ -87,7 +89,13 @@ export class SlackClient {
     const once = () => this.timed(method, async (signal) => {
       const res = await this.fetchImpl(url, { ...init, signal })
       if (res.status === 429) return { limited: true as const, retryAfter: res.headers.get('Retry-After') }
-      return { limited: false as const, body: (await res.json()) as SlackResponse }
+      const text = await res.text()
+      try {
+        return { limited: false as const, body: JSON.parse(text) as SlackResponse }
+      } catch {
+        // An HTML error page from a proxy or a Slack outage: say what came back, not a bare SyntaxError.
+        throw new Error(`slack ${method}: HTTP ${res.status} ${text.replace(/\s+/g, ' ').trim().slice(0, BODY_SNIPPET)}`)
+      }
     })
     let r = await once()
     if (r.limited) {

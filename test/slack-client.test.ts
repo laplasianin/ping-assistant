@@ -161,7 +161,7 @@ test('a hung request rejects after the timeout; every fetch carries an abort sig
 })
 
 test('a body that never arrives also times out', async () => {
-  const stalled = (async () => ({ status: 200, headers: new Headers(), json: () => new Promise(() => {}) }) as unknown as Response) as typeof fetch
+  const stalled = (async () => ({ status: 200, headers: new Headers(), json: () => new Promise(() => {}), text: () => new Promise(() => {}) }) as unknown as Response) as typeof fetch
   await expect(new SlackClient('t', stalled, async () => {}, 20).userName('U1')).rejects.toThrow('timed out')
 })
 
@@ -212,4 +212,25 @@ test('searchDms counts against the request budget', async () => {
   c.resetBudget(0)
   await expect(c.searchDms('2026-10-17', '1.0')).rejects.toBeInstanceOf(BudgetExceeded)
   expect(calls).toHaveLength(0)
+})
+
+test('a non-JSON response (an HTML 5xx page) fails with the method, status and a bounded body', async () => {
+  const html = `<html><body>  <h1>502 Bad Gateway</h1>\n${'x'.repeat(500)}</body></html>`
+  const { fetchImpl } = fake([() => new Response(html, { status: 502, headers: { 'Content-Type': 'text/html' } })])
+  const c = new SlackClient('t', fetchImpl)
+  let err: Error | undefined
+  try { await c.history('C1') } catch (e) { err = e as Error }
+  expect(err).toBeInstanceOf(Error)
+  expect(err!.name).not.toBe('SyntaxError')
+  expect(err!.message).toStartWith('slack conversations.history: HTTP 502 <html><body> <h1>502 Bad Gateway</h1> x')
+  expect(err!.message.length).toBeLessThan(300)
+})
+
+test('429 handling is unchanged when the retry returns JSON', async () => {
+  const { fetchImpl } = fake([
+    () => new Response('<html>slow down</html>', { status: 429 }),
+    json({ ok: true, user: { name: 'ann' } }),
+  ])
+  const c = new SlackClient('t', fetchImpl, async () => {})
+  expect(await c.userName('U1')).toBe('ann')
 })
