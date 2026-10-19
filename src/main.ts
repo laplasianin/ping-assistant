@@ -33,6 +33,11 @@ orchestrator.start()
 log(`started${cfg.dryRun ? ' (dry-run)' : ''}, polling every ${cfg.pollSeconds}s`)
 tg.start().catch((err) => log(`telegram stopped: ${err instanceof Error ? err.name : 'unknown'}`))
 
+// Self-test hook: one synthetic notification, to check that a channel event reaches the session.
+if (process.env.PING_ASSISTANT_SELFTEST === '1') {
+  setTimeout(() => { void channel!.notify(JSON.stringify({ text: 'selftest' }), { kind: 'selftest' }).then(() => log('selftest notification sent')) }, 10_000).unref()
+}
+
 // Claude Code closing the connection EOFs stdin; exit instead of lingering as a zombie.
 let shuttingDown = false
 async function shutdown(): Promise<void> {

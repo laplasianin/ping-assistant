@@ -139,3 +139,18 @@ test('notify emits notifications/claude/channel with meta.source=ping-assistant'
     meta: { source: 'ping-assistant', kind: 'item', item_id: '14' },
   })
 })
+
+test('selftest notification carries meta.kind=selftest and meta.source=ping-assistant', async () => {
+  const { channel, client } = await setup()
+  const Notification = z.object({
+    method: z.literal('notifications/claude/channel'),
+    params: z.object({ content: z.string(), meta: z.record(z.string(), z.string()) }),
+  })
+  const received = new Promise<z.infer<typeof Notification>['params']>(resolve => {
+    client.setNotificationHandler(Notification, n => resolve(n.params))
+  })
+  await channel.notify(JSON.stringify({ text: 'selftest' }), { kind: 'selftest' })
+  const params = await received
+  expect(params.meta).toEqual({ source: 'ping-assistant', kind: 'selftest' })
+  expect(JSON.parse(params.content)).toEqual({ text: 'selftest' })
+})
