@@ -138,3 +138,11 @@ test('request budget counts polling reads only and resets per tick', async () =>
   await c.history('C1')
   expect(calls).toHaveLength(6)
 })
+
+test('searchMentions survives a malformed permalink (no thread)', async () => {
+  const { fetchImpl } = fake([
+    json({ ok: true, messages: { matches: [{ ts: '2', user: 'U2', text: 'x', channel: { id: 'C1' }, permalink: 'not a url' }], paging: { page: 1, pages: 1 } } }),
+  ])
+  const out = await new SlackClient('t', fetchImpl).searchMentions('U1', '2026-10-01')
+  expect(out.map((m) => [m.ts, m.thread_ts])).toEqual([['2', undefined]])
+})

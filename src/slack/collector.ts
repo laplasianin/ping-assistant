@@ -16,6 +16,8 @@ const SKIP_SUBTYPES = new Set(['message_changed', 'message_deleted', 'channel_jo
 const DAY_MS = 86_400_000
 /** Quiet DMs (no activity in 24h) are read on every DM_SWEEP_EVERY-th tick only. */
 const DM_SWEEP_EVERY = 10
+/** search.messages indexes with a lag: the floor trails the newest hit so late-indexed messages are still found. */
+const SEARCH_LAG_S = 600
 
 export function cmpTs(a: string, b: string): number {
   const [as = '0', af = ''] = a.split('.')
@@ -26,6 +28,10 @@ const maxTs = (a: string | undefined, ...rest: (string | undefined)[]): string |
   [a, ...rest].reduce((m, t) => (t && (!m || cmpTs(t, m) > 0) ? t : m), undefined as string | undefined)
 const minTs = (a: string, b: string): string => (cmpTs(a, b) <= 0 ? a : b)
 const tsOf = (ms: number): string => `${Math.floor(ms / 1000)}.000000`
+const shiftTs = (ts: string, seconds: number): string => {
+  const [s = '0', f = '000000'] = ts.split('.')
+  return `${Number(s) + seconds}.${f.padEnd(6, '0')}`
+}
 const isoDate = (ms: number): string => new Date(ms).toISOString().slice(0, 10)
 const log = (source: string, err: unknown): void => {
   process.stderr.write(`ping-assistant: ${source} failed: ${err instanceof Error ? err.message : String(err)}\n`)
@@ -170,7 +176,9 @@ export class Collector {
     // Slack evaluates `after:` in the user's local zone: query two days earlier, filter by exact ts.
     const after = isoDate(Number(floor.split('.')[0]) * 1000 - 2 * DAY_MS)
     const raws = (await this.slack.searchMentions(this.cfg.userId, after)).filter((m) => cmpTs(m.ts, floor) > 0)
-    return { raws, cursors: { search: maxTs(floor, ...raws.map((m) => m.ts))! } }
+    // Hits inside the trailing window come back next tick too; msgIndex and the seen set drop them.
+    const newest = maxTs(undefined, ...raws.map((m) => m.ts))
+    return { raws, cursors: { search: newest ? maxTs(floor, shiftTs(newest, -SEARCH_LAG_S))! : floor } }
   }
 
   /**

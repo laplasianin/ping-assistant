@@ -93,7 +93,7 @@ test('mention found by search is deduped against msgIndex and other sources', as
   const out = await make().tick(NOW)
   expect(out.map((o) => [o.msg.ts, o.source])).toEqual([['1792410100.2', 'im'], ['1792410200.3', 'mention']])
   expect(slack.searchArgs).toEqual(['1969-12-30'])
-  expect(state.cursors.search).toBe('1792410200.3')
+  expect(state.cursors.search).toBe('1792409600.300000') // newest hit minus the 600s index lag
 })
 
 test('watched channel thread replies are fetched', async () => {
@@ -198,7 +198,8 @@ test('search floor is a ts: crosses UTC midnight and ignores older hits', async 
   const out = await make().tick(Date.UTC(2026, 9, 20, 0, 1, 0))
   expect(out.map((o) => o.msg.ts)).toEqual([hit])
   expect(slack.searchArgs).toEqual(['2026-10-17'])
-  expect(state.cursors.search).toBe(hit)
+  expect(state.cursors.search).toBe(floor) // hit - 600s is below the old floor: the floor never moves back
+  state.msgIndex[`C9:${hit}`] = 'i1' // the orchestrator ingested it
   slack.mentions = [{ ts: hit, channel: 'C9', user: 'U2', text: 'new' }]
   expect(await make().tick(Date.UTC(2026, 9, 20, 0, 2, 0))).toEqual([])
 })
@@ -336,4 +337,18 @@ test('request budget: remaining sources are skipped with cursors untouched and o
   const next = await make().tick(NOW + 60_000)
   expect(next.filter((o) => o.msg.channel === 'D2').map((o) => o.msg.text)).toEqual(['later'])
   expect(state.cursors['hist:D2']).toBe('3.0')
+})
+
+test('search floor trails the newest hit by 600s so a late-indexed mention is still collected', async () => {
+  const at = (s: number) => `${NOW / 1000 + s}.000000`
+  state.cursors = { ...base, search: at(-3600) }
+  slack.mentions = [{ ts: at(-60), channel: 'C9', user: 'U2', text: 'indexed fast' }]
+  expect((await make().tick(NOW)).map((o) => o.msg.text)).toEqual(['indexed fast'])
+  expect(state.cursors.search).toBe(at(-660))
+  state.msgIndex[`C9:${at(-60)}`] = '1'
+
+  // Posted before the first hit but indexed only now.
+  slack.mentions = [{ ts: at(-300), channel: 'C9', user: 'U3', text: 'indexed late' }, { ts: at(-60), channel: 'C9', user: 'U2', text: 'indexed fast' }]
+  expect((await make().tick(NOW + 60_000)).map((o) => o.msg.text)).toEqual(['indexed late'])
+  expect(state.cursors.search).toBe(at(-660))
 })

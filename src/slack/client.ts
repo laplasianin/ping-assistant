@@ -24,6 +24,16 @@ export class BudgetExceeded extends Error {
   }
 }
 
+/** Search hits carry thread_ts only in the permalink query; a malformed permalink means «not in a thread». */
+function threadFromPermalink(permalink: string | undefined): string | undefined {
+  if (!permalink) return undefined
+  try {
+    return new URL(permalink).searchParams.get('thread_ts') ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
 export class SlackClient {
   constructor(
     private readonly token: string,
@@ -100,7 +110,7 @@ export class SlackClient {
       const res = await this.get('search.messages', { query: `<@${userId}> after:${afterDate}`, sort: 'timestamp', sort_dir: 'asc', count: 100, page })
       for (const m of (res.messages?.matches ?? []) as (Omit<RawMsg, 'channel'> & { channel?: { id: string } | string })[]) {
         if (m.user === userId) continue
-        const threadTs = m.thread_ts ?? (m.permalink ? new URL(m.permalink).searchParams.get('thread_ts') ?? undefined : undefined)
+        const threadTs = m.thread_ts ?? threadFromPermalink(m.permalink)
         out.push({ ...m, channel: typeof m.channel === 'string' ? m.channel : m.channel?.id, ...(threadTs ? { thread_ts: threadTs } : {}) })
       }
       pages = res.messages?.paging?.pages ?? 1
