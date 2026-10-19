@@ -88,6 +88,6 @@ export function mature(state: State, now: number, cfg: Config): Item[] {
     .filter((i) => i.status === 'settling'
       && (now - i.lastMessageAt >= cfg.settleSeconds * 1000 || now - i.createdAt >= cfg.maxSettleSeconds * 1000))
     .sort((a, b) => a.createdAt - b.createdAt)
-  for (const i of ripe) i.status = 'triage'
+  for (const i of ripe) { i.status = 'triage'; i.triageAt = now }
   return ripe
 }

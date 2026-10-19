@@ -8,11 +8,12 @@ export type Item = {
   id: string; seq: number; sub: number; status: ItemStatus; source: ItemSource;
   channel: string; channelName?: string; threadTs?: string; author: string; authorName?: string;
   messages: SlackMsg[]; context: SlackMsg[]; lastSeenTs: string;
-  createdAt: number; lastMessageAt: number;
+  createdAt: number; lastMessageAt: number; triageAt?: number;  // triageAt: when it was last handed to the session
   analysis?: string; variants?: string[]; pendingText?: string; forceSend?: boolean;
   // text: the item message's last Telegram chunk without the hint line; chosen: variant held by a force warning;
-  // warningMessageId: the live «тред изменился» message whose buttons may force or cancel.
-  telegram: { messageId?: number; proposalMessageId?: number; warningMessageId?: number; text?: string; chosen?: number };
+  // warningMessageId: the live «тред изменился» message whose buttons may force or cancel;
+  // triageAlerted: the «без разбора» reminder was sent (once per triage).
+  telegram: { messageId?: number; proposalMessageId?: number; warningMessageId?: number; text?: string; chosen?: number; triageAlerted?: boolean };
   ignoreReason?: string; sentTs?: string;
 }
 export type State = {

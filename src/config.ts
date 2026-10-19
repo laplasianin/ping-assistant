@@ -6,7 +6,7 @@ import { z } from 'zod'
 export type Config = {
   userId: string; watchChannels: string[]; telegramChatId: string;
   pollSeconds: number; settleSeconds: number; maxSettleSeconds: number;
-  followUpDays: number; contextMessages: number; scentbirdRepoPath: string;
+  followUpDays: number; contextMessages: number; scentbirdRepoPath: string; triageTimeoutSeconds: number;
   dryRun: boolean; statePath: string;
 }
 
@@ -25,6 +25,7 @@ const ConfigSchema = z.object({
   maxSettleSeconds: z.number().positive().default(300),
   followUpDays: z.number().positive().default(7),
   contextMessages: z.number().int().positive().default(30),
+  triageTimeoutSeconds: z.number().positive().default(600),
   scentbirdRepoPath: z.string().min(1),
   dryRun: z.boolean().default(false),
   statePath: z.string().default('~/.config/ping-assistant/state.json'),

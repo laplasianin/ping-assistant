@@ -8,6 +8,7 @@
   "maxSettleSeconds": 300,
   "followUpDays": 7,
   "contextMessages": 30,
+  "triageTimeoutSeconds": 600,
   "dryRun": false,
   "statePath": "~/.config/ping-assistant/state.json"
 }

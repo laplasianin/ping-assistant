@@ -1,7 +1,7 @@
 // Wires Slack collection, item state, Telegram and the MCP channel together.
 // Invariant: only sendToSlack calls slack.postMessage, and only on Ilya's command from Telegram.
 import type { Channel, ChannelHandlers } from './channel'
-import type { Command } from './commands'
+import { callbackData, type Command } from './commands'
 import type { Config } from './config'
 import { chunk, outcome, renderItem, renderProposal, renderThreadChanged, renderUpdate, slackify, type Keyboard } from './format'
 import { ingest, mature } from './items'
@@ -55,6 +55,12 @@ export class Orchestrator {
     for (const item of Object.values(state.items)) {
       const { messageId, proposalMessageId, warningMessageId } = item.telegram
       for (const id of [messageId, proposalMessageId, warningMessageId]) if (id !== undefined) tg.registerMessage(id, item.id)
+      // The session that was triaging it is gone: hand it to the new one on the next tick.
+      if (item.status === 'triage') {
+        item.status = 'settling'
+        item.lastMessageAt = this.now() - cfg.settleSeconds * 1000
+        item.telegram.triageAlerted = undefined
+      }
     }
     tg.onInbound((i) => this.handle(i))
     this.timer = setInterval(() => { void this.tick() }, cfg.pollSeconds * 1000)
@@ -95,6 +101,7 @@ export class Orchestrator {
       // Only now: every collected message is in msgIndex, so a restart from these cursors loses nothing.
       applyCursors(state, batch)
       for (const item of mature(state, now, cfg)) await this.deliver(item)
+      await this.triageWatchdog(now)
     } catch (err) {
       log(`tick failed: ${errName(err)}`)
     } finally {
@@ -212,7 +219,8 @@ export class Orchestrator {
     }
     const item = state.items[c.itemId]
     if (!item) { await tg.send(`Не знаю айтем #${c.itemId}`); return }
-    if (item.status !== 'awaiting') { await tg.send(`#${item.id} уже закрыт: ${outcome(item) || item.status}`); return }
+    const skippable = c.kind === 'skip' && item.status === 'triage' // from the «без разбора» reminder
+    if (item.status !== 'awaiting' && !skippable) { await tg.send(`#${item.id} уже закрыт: ${outcome(item) || item.status}`); return }
     if (button && this.staleButton(item, c, messageId)) { await tg.send(`Кнопка устарела, см. #${item.id} ниже`); return }
 
     switch (c.kind) {
@@ -357,6 +365,24 @@ export class Orchestrator {
     const id = await tg.send(renderUpdate(item, [msg], state.users, state.channels), undefined, item.telegram.messageId)
     tg.registerMessage(id, item.id)
     await this.d.channel.notify(JSON.stringify({ id: item.id, newMessages: [msgJson(msg)] }), { kind: 'update', item_id: item.id })
+  }
+
+  /** Items the session has not answered for triageTimeoutSeconds: remind Ilya once and nudge the session again. */
+  private async triageWatchdog(now: number): Promise<void> {
+    const { cfg, tg } = this.d
+    for (const item of this.sorted()) {
+      if (item.status !== 'triage' || item.telegram.triageAlerted) continue
+      const since = item.triageAt ?? item.createdAt
+      if (now - since < cfg.triageTimeoutSeconds * 1000) continue
+      await this.safely('triage watchdog', async () => {
+        const text = `⏳ #${item.id} без разбора уже ${Math.floor((now - since) / 60_000)} мин`
+        const id = await tg.send(text, [[{ label: 'Пропустить', data: callbackData({ kind: 'skip', itemId: item.id }) }]])
+        // The reminder stands in for the item message until propose replaces it: skip edits its outcome there.
+        item.telegram = { ...item.telegram, messageId: id, text, triageAlerted: true }
+        tg.registerMessage(id, item.id)
+        await this.d.channel.notify(JSON.stringify(itemJson(item)), { kind: 'item', item_id: item.id })
+      })
+    }
   }
 
   private async deliver(item: Item): Promise<void> {

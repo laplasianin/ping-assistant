@@ -8,7 +8,7 @@ import type { Config } from '../src/config'
 
 const cfg: Config = {
   userId: 'UILYA', watchChannels: [], telegramChatId: '1', pollSeconds: 60,
-  settleSeconds: 90, maxSettleSeconds: 300, followUpDays: 7, contextMessages: 30,
+  settleSeconds: 90, maxSettleSeconds: 300, followUpDays: 7, contextMessages: 30, triageTimeoutSeconds: 600,
   scentbirdRepoPath: '/x', dryRun: false, statePath: '/x/state.json',
 }
 const T0 = 1_760_800_000_000
@@ -63,6 +63,7 @@ test('message after settleSeconds silence matures the item', () => {
   const m = mature(s, T0 + 90_000, cfg)
   expect(m).toHaveLength(1)
   expect(m[0]!.status).toBe('triage')
+  expect(m[0]!.triageAt).toBe(T0 + 90_000)
   expect(mature(s, T0 + 200_000, cfg)).toHaveLength(0)
 })
 

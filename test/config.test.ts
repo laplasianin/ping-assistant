@@ -36,6 +36,7 @@ test('loadConfig applies defaults', () => {
   expect(cfg.maxSettleSeconds).toBe(300)
   expect(cfg.followUpDays).toBe(7)
   expect(cfg.contextMessages).toBe(30)
+  expect(cfg.triageTimeoutSeconds).toBe(600)
   expect(cfg.dryRun).toBe(false)
   expect(cfg.statePath).toBe(join(homedir(), '.config/ping-assistant/state.json'))
 })

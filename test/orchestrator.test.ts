@@ -82,7 +82,7 @@ type NoteParams = z.infer<typeof Note>['params']
 
 const baseCfg: Config = {
   userId: 'ME', watchChannels: ['C1'], telegramChatId: String(CHAT), pollSeconds: 3600, settleSeconds: 90,
-  maxSettleSeconds: 300, followUpDays: 7, contextMessages: 30, scentbirdRepoPath: '/tmp', dryRun: false,
+  maxSettleSeconds: 300, followUpDays: 7, contextMessages: 30, triageTimeoutSeconds: 600, scentbirdRepoPath: '/tmp', dryRun: false,
   statePath: '/tmp/ping-assistant-test/state.json',
 }
 
@@ -711,4 +711,64 @@ test('idle() waits for the in-flight tick', async () => {
   await waiting
   expect(idle).toBe(true)
   expect(e.state.cursors.lastTick).toBe('5.0')
+})
+
+test('start re-delivers items left in triage by a previous session', async () => {
+  const state = emptyState()
+  state.items['5'] = {
+    id: '5', seq: 5, sub: 0, status: 'triage', source: 'im', channel: 'D1', author: 'U2',
+    messages: [{ channel: 'D1', ts: '105.000000', user: 'U2', text: 'вопрос' }], context: [],
+    lastSeenTs: '105.000000', createdAt: T0 - 3_600_000, lastMessageAt: T0 - 3_600_000, triageAt: T0 - 3_000_000,
+    telegram: { triageAlerted: true },
+  }
+  const e = await setup({}, state)
+  expect(state.items['5']!.status).toBe('settling')
+  e.advance(1_000)
+  await e.orch.tick()
+  await e.flush()
+  expect(e.notes.map((n) => [n.meta.kind, n.meta.item_id])).toEqual([['item', '5']])
+  expect(state.items['5']!.status).toBe('triage')
+  expect(state.items['5']!.triageAt).toBe(T0 + 1_000)
+  expect(state.items['5']!.telegram.triageAlerted).toBeUndefined()
+})
+
+test('an item stuck in triage gets one reminder with Пропустить and is re-notified to the session', async () => {
+  const e = await setup()
+  await matureThreadItem(e)
+  e.notes.length = 0
+  e.advance(599_000)
+  await e.orch.tick()
+  expect(e.api.sent).toEqual([])
+
+  e.advance(1_000)
+  await e.orch.tick()
+  await e.flush()
+  const alert = e.api.last()
+  expect(alert.text).toBe('⏳ #1 без разбора уже 10 мин')
+  expect(buttons(alert)).toEqual(['Пропустить'])
+  expect(e.notes.map((n) => [n.meta.kind, n.meta.item_id])).toEqual([['item', '1']])
+
+  e.advance(600_000)
+  await e.orch.tick()
+  await e.flush()
+  expect(e.api.sent).toHaveLength(1) // once per triage
+  expect(e.notes).toHaveLength(1)
+
+  await e.callback('pa:skip:1', alert.id)
+  expect(e.state.items['1']!.status).toBe('skipped')
+  expect(e.api.lastEdit(alert.id)!.text).toBe('⏳ #1 без разбора уже 10 мин\n\n⏭ пропущен')
+  expect(e.slack.posted).toEqual([])
+})
+
+test('propose after a triage reminder replies to it and retires it', async () => {
+  const e = await setup()
+  await matureThreadItem(e)
+  e.advance(600_000)
+  await e.orch.tick()
+  const alert = e.api.last()
+  const sent = await propose(e, ['a', 'b'])
+  expect(sent.opts.reply_parameters).toEqual({ message_id: alert.id })
+  expect(e.api.lastEdit(alert.id)!.opts.reply_markup).toEqual({ inline_keyboard: [] })
+  await e.callback('pa:choose:1:1', sent.id)
+  expect(e.slack.posted).toEqual([{ channel: 'C1', text: 'a', threadTs: '100.000000' }])
 })
