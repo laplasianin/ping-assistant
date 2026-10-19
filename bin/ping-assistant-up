@@ -5,6 +5,10 @@
 # --dangerously-load-development-channels server:ping-assistant: the server from this repo's .mcp.json
 #   becomes a channel. A `plugin:…@local` channel would need the plugin *installed* (a
 #   --plugin-dir load does not count), so the project-level MCP server is used instead.
+# --model: the session model does triage, org answers and orchestration; research and reply
+#   drafting for technical/product items are escalated to an Opus subagent by CLAUDE.md.
+#   Override with PING_ASSISTANT_MODEL (e.g. claude-opus-5-5 or claude-fable-5-1).
 cd "$(dirname "$0")/.." && exec caffeinate -i claude \
   --setting-sources project --permission-mode dontAsk \
+  --model "${PING_ASSISTANT_MODEL:-claude-sonnet-5-5}" \
   --dangerously-load-development-channels server:ping-assistant "$@"
