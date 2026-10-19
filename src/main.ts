@@ -16,7 +16,8 @@ const secrets = loadSecrets()
 const store = new StateStore(cfg.statePath)
 const state = store.load()
 const slack = new SlackClient(secrets.slackToken)
-const collector = new Collector(slack, cfg, state, join(dirname(cfg.statePath), 'files'))
+// The collector gets its own client: its per-tick request budget must never block a send or a pre-send thread check.
+const collector = new Collector(new SlackClient(secrets.slackToken), cfg, state, join(dirname(cfg.statePath), 'files'))
 const tg = new TelegramBot(secrets.telegramToken, cfg.telegramChatId)
 
 // The channel needs the orchestrator's handlers and the orchestrator needs channel.notify.

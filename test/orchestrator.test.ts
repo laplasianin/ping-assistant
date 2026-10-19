@@ -33,6 +33,7 @@ class FakeSlack {
   failReplies = false
   // Surface the real Collector needs beyond what the Orchestrator uses.
   async listDms() { return [] }
+  resetBudget() {}
   async searchMentions() { return [] as RawMsg[] }
   async channelName(id: string) { return `name-${id}` }
   async userName(id: string) { return `User ${id}` }
@@ -532,12 +533,14 @@ test('reply in a thread ping-assistant answered in creates item 1.1 with full th
   const ts = (sec: number) => `${T0 / 1000 + sec}.000000`
   const root = ts(-60)
   const state = emptyState()
-  state.cursors = { lastTick: ts(-100), 'hist:C1': ts(-100), search: ts(-100), [`thr:C1:${root}`]: root }
+  state.cursors = { lastTick: ts(-100), 'hist:C1': ts(-55), search: ts(-100), [`thr:C1:${root}`]: root }
   const e = await setup({}, state, (slack, cfg) => new Collector(slack as never, cfg, state, '/tmp/ping-assistant-test/files'))
   const mine = ts(10)
   e.slack.postMessage = async (channel, text, threadTs) => { e.slack.posted.push({ channel, text, ...(threadTs ? { threadTs } : {}) }); return { ts: mine } }
   const raw = (t: string, user: string, text: string) => ({ ts: t, thread_ts: root, user, text })
   e.slack.repl[`C1:${root}`] = [raw(root, 'U3', 'root'), raw(ts(-30), 'U2', 'Почему падает сборка?')]
+  const rootMsg = { ...raw(root, 'U3', 'root'), latest_reply: ts(-30) }
+  e.slack.hist.C1 = [rootMsg] // the windowed history shows which threads moved
 
   await e.orch.tick() // collects the question
   e.advance(91_000)
@@ -552,6 +555,7 @@ test('reply in a thread ping-assistant answered in creates item 1.1 with full th
   // The thread now holds our message and a foreign reply to it.
   const reply = ts(500)
   e.slack.repl[`C1:${root}`]!.push(raw(mine, 'ME', 'Починю сегодня'), raw(reply, 'U4', 'Спасибо, а когда?'))
+  rootMsg.latest_reply = reply
   e.advance(60_000)
   await e.orch.tick()
   const followup = e.state.items['1.1']!

@@ -12,12 +12,33 @@ type Sleep = (ms: number) => Promise<void>
 const API = 'https://slack.com/api/'
 const defaultSleep: Sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
+/** The polling reads (Slack tier 2-3): the only calls that count against the per-tick budget. */
+const BUDGETED = new Set(['conversations.history', 'conversations.replies', 'users.conversations', 'search.messages'])
+export const DEFAULT_REQUEST_BUDGET = 40
+
+/** Thrown instead of calling Slack once a tick has used its request budget. */
+export class BudgetExceeded extends Error {
+  constructor(limit: number) {
+    super(`slack request budget of ${limit} per tick exhausted`)
+    this.name = 'BudgetExceeded'
+  }
+}
+
 export class SlackClient {
   constructor(
     private readonly token: string,
     private readonly fetchImpl: typeof fetch = fetch,
     private readonly sleep: Sleep = defaultSleep,
   ) {}
+
+  private used = 0
+  private limit = Infinity
+
+  /** Starts a new budget window (the collector calls it at the start of each tick). Unbudgeted until first called. */
+  resetBudget(limit = DEFAULT_REQUEST_BUDGET): void {
+    this.used = 0
+    this.limit = limit
+  }
 
   private async send(method: string, init: RequestInit, url: string): Promise<SlackResponse> {
     let res = await this.fetchImpl(url, init)
@@ -33,6 +54,10 @@ export class SlackClient {
   }
 
   private get(method: string, params: Record<string, string | number | boolean | undefined> = {}): Promise<SlackResponse> {
+    if (BUDGETED.has(method)) {
+      if (this.used >= this.limit) return Promise.reject(new BudgetExceeded(this.limit))
+      this.used++
+    }
     const url = new URL(API + method)
     for (const [k, v] of Object.entries(params)) if (v !== undefined) url.searchParams.set(k, String(v))
     return this.send(method, { headers: { Authorization: `Bearer ${this.token}` } }, url.toString())

@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { SlackClient } from '../src/slack/client'
+import { BudgetExceeded, SlackClient } from '../src/slack/client'
 
 type Call = { url: URL; init?: RequestInit }
 
@@ -119,4 +119,22 @@ test('recent fetches one page of history before a ts, oldest first', async () =>
   expect(calls[0]!.url.searchParams.get('latest')).toBe('10.000000')
   expect(calls[0]!.url.searchParams.get('inclusive')).toBe('false')
   expect(calls[0]!.url.searchParams.get('limit')).toBe('2')
+})
+
+test('request budget counts polling reads only and resets per tick', async () => {
+  const ok = json({ ok: true, messages: [], channel: { name: 'x' }, permalink: 'p', ts: '1.0' })
+  const { fetchImpl, calls } = fake([ok, ok, ok, ok, ok, ok])
+  const c = new SlackClient('t', fetchImpl)
+  c.resetBudget(2)
+  await c.history('C1')
+  await c.replies('C1', '1.0')
+  await expect(c.history('C1')).rejects.toBeInstanceOf(BudgetExceeded)
+  expect(calls).toHaveLength(2) // the refused call never reached Slack
+  await c.channelName('C1') // metadata and sending are not budgeted
+  await c.permalink('C1', '1.0')
+  await c.postMessage('C1', 'hi')
+  expect(calls).toHaveLength(5)
+  c.resetBudget(2)
+  await c.history('C1')
+  expect(calls).toHaveLength(6)
 })

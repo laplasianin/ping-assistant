@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Config } from '../config'
 import type { ItemSource, SlackMsg, State } from '../state'
-import type { RawMsg, SlackClient } from './client'
+import { BudgetExceeded, type RawMsg, type SlackClient } from './client'
 
 export type Collected = { msg: SlackMsg; source: ItemSource }
 /**
@@ -14,6 +14,8 @@ export type TickResult = { collected: Collected[]; cursorUpdates: Record<string,
 
 const SKIP_SUBTYPES = new Set(['message_changed', 'message_deleted', 'channel_join', 'channel_leave', 'bot_message', 'channel_topic', 'channel_purpose'])
 const DAY_MS = 86_400_000
+/** Quiet DMs (no activity in 24h) are read on every DM_SWEEP_EVERY-th tick only. */
+const DM_SWEEP_EVERY = 10
 
 export function cmpTs(a: string, b: string): number {
   const [as = '0', af = ''] = a.split('.')
@@ -22,6 +24,8 @@ export function cmpTs(a: string, b: string): number {
 }
 const maxTs = (a: string | undefined, ...rest: (string | undefined)[]): string | undefined =>
   [a, ...rest].reduce((m, t) => (t && (!m || cmpTs(t, m) > 0) ? t : m), undefined as string | undefined)
+const minTs = (a: string, b: string): string => (cmpTs(a, b) <= 0 ? a : b)
+const tsOf = (ms: number): string => `${Math.floor(ms / 1000)}.000000`
 const isoDate = (ms: number): string => new Date(ms).toISOString().slice(0, 10)
 const log = (source: string, err: unknown): void => {
   process.stderr.write(`ping-assistant: ${source} failed: ${err instanceof Error ? err.message : String(err)}\n`)
@@ -46,14 +50,23 @@ export class Collector {
     private readonly filesDir: string,
   ) {}
 
+  /** Set when the tick's Slack request budget runs out: the remaining sources wait for the next tick. */
+  private exhausted = false
+
   async tick(now: number): Promise<TickResult> {
-    const nowTs = `${Math.floor(now / 1000)}.000000`
+    const nowTs = tsOf(now)
     const out: Collected[] = []
     const seen = new Set<string>()
     const cursorUpdates: Record<string, string> = {}
     const removeCursors = this.expireWatched(now)
+    this.slack.resetBudget()
+    this.exhausted = false
+    let deferred = 0
+    const tickNo = this.state.tickCount ?? 0
+    this.state.tickCount = tickNo + 1
 
     const run = async (name: string, source: ItemSource, read: () => Promise<Read>): Promise<void> => {
+      if (this.exhausted) { deferred++; return } // cursors untouched: read next tick
       try {
         const { raws, cursors, remove } = await read()
         const built: Collected[] = []
@@ -70,11 +83,14 @@ export class Collector {
         Object.assign(cursorUpdates, cursors)
         removeCursors.push(...(remove ?? []))
       } catch (err) {
+        if (err instanceof BudgetExceeded) { this.exhausted = true; deferred++; return }
         log(name, err)
       }
     }
 
+    const sweep = tickNo % DM_SWEEP_EVERY === 0
     for (const dm of await this.listDms()) {
+      if (!sweep && !this.recentlyActive(`hist:${dm.id}`, now)) continue
       await run(`${dm.type} ${dm.id}`, dm.type, () => this.readHistory(dm.id, nowTs))
     }
     await run('mentions', 'mention', () => this.readMentions(nowTs))
@@ -84,9 +100,11 @@ export class Collector {
     for (const key of Object.keys(this.state.watchedThreads)) {
       const i = key.lastIndexOf(':')
       const [channel, threadTs] = [key.slice(0, i), key.slice(i + 1)]
+      if (this.cfg.watchChannels.includes(channel)) continue // readChannel tracks it through its thr: cursor
       await run(`thread ${key}`, 'followup', () => this.readThread(channel, threadTs, nowTs))
     }
 
+    if (this.exhausted) process.stderr.write(`ping-assistant: slack request budget exhausted, ${deferred} source(s) deferred to the next tick\n`)
     cursorUpdates.lastTick = nowTs
     return { collected: out.sort((a, b) => cmpTs(a.msg.ts, b.msg.ts)), cursorUpdates, removeCursors }
   }
@@ -106,7 +124,19 @@ export class Collector {
   }
 
   private async listDms(): Promise<{ id: string; type: 'im' | 'mpim' }[]> {
-    try { return await this.slack.listDms() } catch (err) { log('listDms', err); return [] }
+    try {
+      return await this.slack.listDms()
+    } catch (err) {
+      if (err instanceof BudgetExceeded) this.exhausted = true
+      else log('listDms', err)
+      return []
+    }
+  }
+
+  /** A DM without a cursor is new (read now); otherwise its cursor is the last message seen in it. */
+  private recentlyActive(key: string, now: number): boolean {
+    const cursor = this.state.cursors[key]
+    return !cursor || Number(cursor.split('.')[0]) * 1000 >= now - DAY_MS
   }
 
   private withChannel(raws: RawMsg[], channel: string): RawMsg[] {
@@ -143,21 +173,31 @@ export class Collector {
     return { raws, cursors: { search: maxTs(floor, ...raws.map((m) => m.ts))! } }
   }
 
+  /**
+   * One windowed history read per tick (oldest = followUpDays ago) yields both the new top-level messages
+   * (after the hist: cursor) and latest_reply of every recent root, so conversations.replies is called only
+   * for threads that moved since their thr: cursor. Watched roots older than the window are always read.
+   */
   private async readChannel(channel: string, nowTs: string, now: number): Promise<Read> {
-    const hist = await this.readHistory(channel, nowTs)
-    const raws = [...hist.raws]
-    const cursors = { ...hist.cursors }
+    const histKey = `hist:${channel}`
+    const cursor = this.start(histKey)
+    if (!cursor) return { raws: [], cursors: { [histKey]: nowTs } }
+    const horizon = tsOf(now - this.cfg.followUpDays * DAY_MS)
+    const window = this.withChannel(await this.slack.history(channel, minTs(cursor, horizon)), channel)
+    const fresh = window.filter((m) => cmpTs(m.ts, cursor) > 0)
+    const raws = [...fresh]
+    const cursors: Record<string, string> = { [histKey]: maxTs(cursor, ...fresh.map((m) => m.ts))! }
     const remove: string[] = []
-    if (!this.state.cursors[`hist:${channel}`] && !this.state.cursors.lastTick) return hist
+    const latestReply = new Map<string, string>()
+    for (const m of window) if (m.latest_reply && (m.thread_ts ?? m.ts) === m.ts) latestReply.set(m.ts, m.latest_reply)
 
     // Any top-level message can become a thread root: track every one from the moment it is seen.
     const prefix = `thr:${channel}:`
-    for (const m of hist.raws) {
+    for (const m of fresh) {
       const key = `${prefix}${m.thread_ts ?? m.ts}`
       if (!(key in this.state.cursors)) cursors[key] = m.thread_ts ?? m.ts
     }
 
-    const horizon = `${Math.floor((now - this.cfg.followUpDays * DAY_MS) / 1000)}.000000`
     const tracked = new Set<string>(Object.keys(cursors).filter((k) => k.startsWith(prefix)))
     for (const k of Object.keys(this.state.cursors)) {
       if (!k.startsWith(prefix)) continue
@@ -168,12 +208,16 @@ export class Collector {
 
     for (const key of tracked) {
       const threadTs = key.slice(prefix.length)
-      const cursor = cursors[key] ?? this.state.cursors[key]!
+      const threadCursor = cursors[key] ?? this.state.cursors[key]!
+      const latest = latestReply.get(threadTs)
+      const inWindow = cmpTs(threadTs, horizon) >= 0
+      if (inWindow && (latest === undefined || cmpTs(latest, threadCursor) <= 0)) continue // thread unchanged
       try {
-        const replies = this.withChannel(await this.slack.replies(channel, threadTs, cursor), channel)
+        const replies = this.withChannel(await this.slack.replies(channel, threadTs, threadCursor), channel)
         raws.push(...replies)
-        cursors[key] = maxTs(cursor, ...replies.map((m) => m.ts))!
+        cursors[key] = maxTs(threadCursor, ...replies.map((m) => m.ts))!
       } catch (err) {
+        if (err instanceof BudgetExceeded) { this.exhausted = true; break } // the rest keep their cursors
         log(`thread ${channel}:${threadTs}`, err)
       }
     }

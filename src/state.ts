@@ -22,6 +22,7 @@ export type State = {
   msgIndex: Record<string, string>;           // `${channel}:${ts}` → item.id (дедуп)
   watchedThreads: Record<string, { until: number }>;  // `${channel}:${threadTs}`
   users: Record<string, string>;              // userId → display name (кэш)
+  tickCount?: number;                         // collector ticks so far (quiet DMs are swept every 10th)
   channels: Record<string, string>;           // channelId → name (кэш)
 }
 

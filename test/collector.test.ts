@@ -1,6 +1,6 @@
 import { test, expect, afterEach, beforeEach, spyOn } from 'bun:test'
 import { applyCursors, Collector } from '../src/slack/collector'
-import type { RawMsg, SlackClient } from '../src/slack/client'
+import { BudgetExceeded, type RawMsg, type SlackClient } from '../src/slack/client'
 import { emptyState } from '../src/state'
 import type { Config } from '../src/config'
 
@@ -15,13 +15,19 @@ class FakeSlack {
   failHistory = new Set<string>()
   calls: string[] = []
   searchArgs: string[] = []
-  async listDms() { return this.dms }
+  budget = Infinity
+  used = 0
+  private spend() { if (++this.used > this.budget) throw new BudgetExceeded(this.budget) }
+  async listDms() { this.spend(); return this.dms }
+  resetBudget() { this.used = 0 }
   async history(channel: string, oldest?: string) {
+    this.spend()
     this.calls.push(`history ${channel} ${oldest}`)
     if (this.failHistory.has(channel)) throw new Error('boom')
     return this.hist[channel] ?? []
   }
   async replies(channel: string, threadTs: string, oldest?: string) {
+    this.spend()
     this.calls.push(`replies ${channel}:${threadTs} ${oldest}`)
     return this.repl[`${channel}:${threadTs}`] ?? []
   }
@@ -147,7 +153,7 @@ test('reply in a later tick to a root that had none is returned', async () => {
   const c = make()
   expect((await c.tick(NOW)).map((o) => o.msg.ts)).toEqual([T(50)])
   expect(state.cursors[`thr:C1:${T(50)}`]).toBe(T(50))
-  slack.hist = {}
+  slack.hist = { C1: [{ ts: T(50), user: 'U2', text: 'root', reply_count: 1, latest_reply: T(60) }] } // still in the window, now with a reply
   slack.repl = { [`C1:${T(50)}`]: [{ ts: T(60), thread_ts: T(50), user: 'U3', text: 'reply' }] }
   const out = await c.tick(NOW + 60_000)
   expect(out.map((o) => [o.msg.ts, o.source, o.msg.threadTs])).toEqual([[T(60), 'channel', T(50)]])
@@ -158,6 +164,7 @@ test('followUpDays horizon: old thread cursors are pruned and not fetched', asyn
   const oldTs = `${NOW / 1000 - 8 * 86400}.000000`
   const freshTs = `${NOW / 1000 - 6 * 86400}.000000`
   state.cursors = { ...base, [`thr:C1:${oldTs}`]: oldTs, [`thr:C1:${freshTs}`]: freshTs }
+  slack.hist = { C1: [{ ts: freshTs, user: 'U2', text: 'root', latest_reply: `${NOW / 1000 - 3600}.000000` }] }
   await make().tick(NOW)
   expect(state.cursors[`thr:C1:${oldTs}`]).toBeUndefined()
   expect(state.cursors[`thr:C1:${freshTs}`]).toBe(freshTs)
@@ -216,8 +223,12 @@ test('downloaded file path is filesDir/channel-ts-name', async () => {
 })
 
 test('failing thread does not block the rest of the channel source', async () => {
-  state.cursors = { 'hist:C1': T(0), search: '1.0', [`thr:C1:${T(40)}`]: T(40), [`thr:C1:${T(41)}`]: T(41) }
-  slack.hist = { C1: [{ ts: T(50), user: 'U2', text: 'new' }] }
+  state.cursors = { 'hist:C1': T(45), search: '1.0', [`thr:C1:${T(40)}`]: T(40), [`thr:C1:${T(41)}`]: T(41) }
+  slack.hist = { C1: [
+    { ts: T(40), user: 'U2', text: 'a', latest_reply: T(45) },
+    { ts: T(41), user: 'U2', text: 'b', latest_reply: T(42) },
+    { ts: T(50), user: 'U2', text: 'new' },
+  ] }
   slack.repl = { [`C1:${T(41)}`]: [{ ts: T(42), thread_ts: T(41), user: 'U3', text: 'ok' }] }
   const orig = slack.replies.bind(slack)
   slack.replies = async (c: string, t: string, o?: string) => { if (t === T(40)) throw new Error('thread boom'); return orig(c, t, o) }
@@ -269,4 +280,60 @@ test('applyCursors never moves a cursor backwards', () => {
   state.cursors = { 'thr:C1:1.0': '9000.000100', gone: '1.0' }
   applyCursors(state, { cursorUpdates: { 'thr:C1:1.0': '50.0', 'hist:D1': '2.0' }, removeCursors: ['gone'] })
   expect(state.cursors).toEqual({ 'thr:C1:1.0': '9000.000100', 'hist:D1': '2.0' })
+})
+
+test('watch channel: one windowed history read; replies only for threads whose latest_reply moved', async () => {
+  const horizon = `${NOW / 1000 - 7 * 86400}.000000`
+  const [a, b, c] = [T(10), T(20), T(30)]
+  state.cursors = { 'hist:C1': T(40), search: '1.0', [`thr:C1:${a}`]: T(15), [`thr:C1:${b}`]: T(25), [`thr:C1:${c}`]: c }
+  state.watchedThreads[`C1:${b}`] = { until: NOW + 1 } // answered by us: still read once, via the channel
+  slack.hist = { C1: [
+    { ts: a, user: 'U2', text: 'a', latest_reply: T(15) }, // unchanged since its cursor
+    { ts: b, user: 'U2', text: 'b', latest_reply: T(26) }, // moved
+    { ts: c, user: 'U2', text: 'c' },                      // no replies at all
+  ] }
+  slack.repl = { [`C1:${b}`]: [{ ts: T(26), thread_ts: b, user: 'U3', text: 'new reply' }] }
+  const out = await make().tick(NOW)
+  expect(slack.calls).toEqual([`history C1 ${horizon}`, `replies C1:${b} ${T(25)}`])
+  expect(out.map((o) => o.msg.text)).toEqual(['new reply'])
+  expect(state.cursors[`thr:C1:${a}`]).toBe(T(15))
+  expect(state.cursors[`thr:C1:${b}`]).toBe(T(26))
+  expect(state.cursors['hist:C1']).toBe(T(40))
+})
+
+test('quiet DMs are read every 10th tick only; active and new ones every tick', async () => {
+  const day = 86_400
+  slack.dms = [{ id: 'D1', type: 'im' }, { id: 'D2', type: 'im' }, { id: 'D3', type: 'mpim' }]
+  state.cursors = {
+    'hist:C1': '100.000000', search: '1.0', lastTick: `${NOW / 1000 - 60}.000000`,
+    'hist:D1': `${NOW / 1000 - 3600}.000000`, // active within 24h
+    'hist:D2': `${NOW / 1000 - 2 * day}.000000`, // quiet
+  } // D3 has no cursor: new
+  state.tickCount = 1
+  await make().tick(NOW)
+  const dmReads = () => slack.calls.filter((c) => c.startsWith('history D')).map((c) => c.split(' ')[1])
+  expect(dmReads()).toEqual(['D1', 'D3'])
+  slack.calls = []
+  state.tickCount = 10
+  await make().tick(NOW)
+  expect(dmReads()).toEqual(['D1', 'D2', 'D3'])
+  expect(state.tickCount).toBe(11)
+})
+
+test('request budget: remaining sources are skipped with cursors untouched and one log line', async () => {
+  slack.dms = [{ id: 'D1', type: 'im' }, { id: 'D2', type: 'im' }]
+  state.cursors = { 'hist:D1': '1.0', 'hist:D2': '1.0', 'hist:C1': '1.0', search: '1.0' }
+  slack.hist = { D1: [{ ts: '2.0', user: 'U2', text: 'ok' }], D2: [{ ts: '3.0', user: 'U2', text: 'later' }] }
+  slack.budget = 2 // listDms + D1
+  const out = await make().tick(NOW)
+  expect(out.map((o) => o.msg.text)).toEqual(['ok'])
+  expect(state.cursors).toMatchObject({ 'hist:D1': '2.0', 'hist:D2': '1.0', 'hist:C1': '1.0', search: '1.0' })
+  const lines = stderr.mock.calls.map((c: unknown[]) => String(c[0]))
+  expect(lines).toEqual(['ping-assistant: slack request budget exhausted, 3 source(s) deferred to the next tick\n'])
+
+  slack.budget = Infinity // next tick: the deferred sources resume from their cursors
+  state.tickCount = 10 // D2 is quiet (old cursor): it is read on the sweep tick
+  const next = await make().tick(NOW + 60_000)
+  expect(next.filter((o) => o.msg.channel === 'D2').map((o) => o.msg.text)).toEqual(['later'])
+  expect(state.cursors['hist:D2']).toBe('3.0')
 })
