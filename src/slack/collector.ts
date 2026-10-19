@@ -232,9 +232,13 @@ export class Collector {
 
     // Any top-level message can become a thread root: track every one from the moment it is seen.
     const prefix = `thr:${channel}:`
-    for (const m of fresh) {
-      const key = `${prefix}${m.thread_ts ?? m.ts}`
-      if (!(key in this.state.cursors)) cursors[key] = m.thread_ts ?? m.ts
+    // Roots already in the window at first sight start at the hist: cursor, so only later replies are collected.
+    for (const m of window) {
+      const isFresh = cmpTs(m.ts, cursor) > 0
+      if (!isFresh && m.thread_ts && m.thread_ts !== m.ts) continue // old broadcast reply, not a root
+      const rootTs = m.thread_ts ?? m.ts
+      const key = `${prefix}${rootTs}`
+      if (!(key in this.state.cursors)) cursors[key] = isFresh ? rootTs : cursor
     }
 
     const tracked = new Set<string>(Object.keys(cursors).filter((k) => k.startsWith(prefix)))

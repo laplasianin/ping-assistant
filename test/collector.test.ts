@@ -418,3 +418,29 @@ test('selfDmChannel stays undefined without a self IM', async () => {
   await make().tick(NOW)
   expect(state.selfDmChannel).toBeUndefined()
 })
+
+test('pre-existing thread root: new replies are collected from the hist cursor, old ones are not', async () => {
+  state.cursors = { 'hist:C1': T(100), search: '1.0' }
+  slack.hist = { C1: [{ ts: T(50), user: 'U2', text: 'old root', reply_count: 2, latest_reply: T(120) }] }
+  const all = [
+    { ts: T(60), thread_ts: T(50), user: 'U3', text: 'old reply' },
+    { ts: T(120), thread_ts: T(50), user: 'U3', text: 'new reply' },
+  ]
+  slack.replies = async (c: string, t: string, o?: string) => {
+    slack.calls.push(`replies ${c}:${t} ${o}`)
+    return all.filter((m) => !o || m.ts > o) // like conversations.replies, oldest is exclusive
+  }
+  const out = await make().tick(NOW)
+  expect(slack.calls).toContain(`replies C1:${T(50)} ${T(100)}`)
+  expect(out.map((o) => o.msg.ts)).toEqual([T(120)])
+  expect(state.cursors[`thr:C1:${T(50)}`]).toBe(T(120))
+})
+
+test('pre-existing thread root without new replies gets a cursor at the hist cursor and no replies call', async () => {
+  state.cursors = { 'hist:C1': T(100), search: '1.0' }
+  slack.hist = { C1: [{ ts: T(50), user: 'U2', text: 'old root', reply_count: 1, latest_reply: T(60) }] }
+  const out = await make().tick(NOW)
+  expect(out).toEqual([])
+  expect(state.cursors[`thr:C1:${T(50)}`]).toBe(T(100))
+  expect(slack.calls.some((c) => c.startsWith('replies'))).toBe(false)
+})
