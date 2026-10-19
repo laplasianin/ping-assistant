@@ -281,7 +281,9 @@ export class Orchestrator {
       case 'cancel': {
         // A text «cancel» does not exist: messageId is the proposal or warning that carried the button.
         const isProposal = messageId === item.telegram.proposalMessageId
-        const text = isProposal && item.pendingText ? lastPart(renderProposal(item, item.pendingText).text) : `#${item.id}`
+        const isWarning = messageId === item.telegram.warningMessageId && item.telegram.warningText !== undefined
+        const text = isProposal && item.pendingText ? lastPart(renderProposal(item, item.pendingText).text)
+          : isWarning ? item.telegram.warningText! : `#${item.id}`
         await this.msgs.edit(messageId, `${text}\n\n❌ отменено`)
         this.clearHeld(item)
         await this.msgs.retire(item, messageId)
@@ -352,6 +354,7 @@ export class Orchestrator {
     item.forceSend = true
     item.telegram.chosen = typeof chosen === 'number' ? chosen : undefined
     item.telegram.warningMessageId = wid
+    item.telegram.warningText = lastPart(warning) // a cancel keeps what the warning said
     tg.registerMessage(wid, item.id)
   }
 

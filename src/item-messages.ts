@@ -31,18 +31,28 @@ export function itemJson(item: Item) {
 }
 
 export class ItemMessages {
-  constructor(private readonly tg: Pick<TelegramBot, 'edit' | 'dropKeyboard'>) {}
+  constructor(private readonly tg: Pick<TelegramBot, 'edit' | 'dropKeyboard' | 'send'>) {}
 
   /** Edits the item's Telegram message to its final outcome (buttons removed). */
   closeOriginal(item: Item): Promise<void> {
     return this.annotate(item, outcome(item))
   }
 
-  /** Appends a status line to the item's message, removing its buttons. */
+  /**
+   * Appends a status line to the item's message, removing its buttons. A last chunk too full for the line
+   * loses only its buttons, and the line goes out as a short reply to it instead of being dropped.
+   */
   async annotate(item: Item, line: string): Promise<void> {
     const { messageId, text } = item.telegram
     if (messageId === undefined || !text) return
-    await this.edit(messageId, `${text}\n\n${line}`)
+    const full = `${text}\n\n${line}`
+    if (full.length <= TG_LIMIT) { await this.edit(messageId, full); return }
+    await this.dropKeyboard(messageId)
+    try {
+      await this.tg.send(`#${item.id} · ${line}`, undefined, messageId)
+    } catch (err) {
+      log(`telegram send failed: ${errName(err)}`)
+    }
   }
 
   /** Strips the buttons of the item's proposal and warning messages (except `keep`) and forgets them. */
@@ -52,6 +62,7 @@ export class ItemMessages {
       if (id === undefined) continue
       if (id !== keep) await this.dropKeyboard(id)
       item.telegram[key] = undefined
+      if (key === 'warningMessageId') item.telegram.warningText = undefined
     }
   }
 

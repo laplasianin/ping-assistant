@@ -439,8 +439,14 @@ test('cancel on a thread-changed warning clears the held text and force flag', a
   const sent = await propose(e, ['a', 'b'])
   e.slack.repl['C1:100.000000'] = [{ ts: '108.000000', user: 'U5', text: 'Уже починил' }]
   await e.callback('pa:choose:1:1', sent.id)
-  await e.callback('pa:cancel:1', e.api.last().id)
+  const warning = e.api.last()
+  await e.callback('pa:cancel:1', warning.id)
 
+  // The warning keeps what it said; only its buttons go.
+  const edit = e.api.lastEdit(warning.id)!
+  expect(edit.text).toBe(`${warning.text}\n\n❌ отменено`)
+  expect(edit.text).toContain('Уже починил')
+  expect(edit.opts.reply_markup).toEqual({ inline_keyboard: [] })
   const item = e.state.items['1']!
   expect(item.pendingText).toBeUndefined()
   expect(item.forceSend).toBeUndefined()

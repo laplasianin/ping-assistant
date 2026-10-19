@@ -14,9 +14,9 @@ export type Item = {
   createdAt: number; lastMessageAt: number; triageAt?: number;  // triageAt: when it was last handed to the session
   analysis?: string; variants?: string[]; pendingText?: string; forceSend?: boolean;
   // text: the item message's last Telegram chunk without the hint line; chosen: variant held by a force warning;
-  // warningMessageId: the live «тред изменился» message whose buttons may force or cancel;
+  // warningMessageId: the live «тред изменился» message whose buttons may force or cancel (warningText: its last chunk);
   // triageAlerted: the «без разбора» reminder was sent (once per triage).
-  telegram: { messageId?: number; proposalMessageId?: number; warningMessageId?: number; text?: string; chosen?: number; triageAlerted?: boolean };
+  telegram: { messageId?: number; proposalMessageId?: number; warningMessageId?: number; warningText?: string; text?: string; chosen?: number; triageAlerted?: boolean };
   ignoreReason?: string; sentTs?: string;
 }
 export type State = {
