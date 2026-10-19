@@ -88,10 +88,22 @@ cp ping-assistant.config.example.json ping-assistant.config.json
 bin/ping-assistant-up
 ```
 
-Это `caffeinate -i claude --plugin-dir . --channels plugin:ping-assistant@local`, запущенный
-из корня проекта; дополнительные аргументы пробрасываются в `claude`. Флаг `--channels`
+Это `caffeinate -i claude --setting-sources project --permission-mode dontAsk --plugin-dir . --channels plugin:ping-assistant@local`,
+запущенный из корня проекта; дополнительные аргументы пробрасываются в `claude`. Флаг `--channels`
 требует тег `plugin:<name>@<marketplace>`: голый `plugin:ping-assistant` CLI отклоняет.
 Первый тик (через `pollSeconds`) ставит курсоры на «сейчас», прошлое не разбирается.
+
+Два флага безопасности, без них гарантия «ничего не уходит без подтверждения» не механическая:
+
+- `--setting-sources project`: действует только `.claude/settings.json` проекта. Пользовательские
+  разрешения с этого мака (например, `Bash(python:*)`, `Bash(curl:*)`) в сессию не попадают,
+  значит модель не может прочитать токен из `~/.config/ping-assistant/.env` и постить в Slack
+  мимо сервера. Нужные сессии плагины включены в `enabledPlugins` проекта (сейчас только Atlassian).
+- `--permission-mode dontAsk`: всё, что не разрешено явно, отклоняется, а не ждёт ответа
+  в терминале. Иначе один запрос прав заморозил бы безнадзорную сессию.
+
+Дополнительно `.claude/settings.json` запрещает интерпретаторы (`python`, `node`, `bun`, `curl`…)
+и чтение каталога `~/.config/ping-assistant/` инструментами `Read`/`Grep`/`Glob`.
 
 Логи: stderr сервера (Claude Code пишет его в логи MCP-сервера, видно с `claude --debug`).
 В них только виды событий, без текста сообщений. Состояние: `~/.config/ping-assistant/state.json`.

@@ -73,10 +73,33 @@
       "mcp__claude_ai_Atlassian_Rovo__addTeamworkGraphContext",
       "mcp__plugin_atlassian_atlassian__addGraphContext",
       "Bash(git push:*)",
+      "Bash(git -c:*)",
+      "Bash(python:*)",
+      "Bash(python3:*)",
+      "Bash(node:*)",
+      "Bash(bun:*)",
+      "Bash(bunx:*)",
+      "Bash(npx:*)",
+      "Bash(npm:*)",
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+      "Bash(cat:*)",
+      "Bash(sh:*)",
+      "Bash(bash:*)",
+      "Bash(zsh:*)",
+      "Read(~/.config/ping-assistant/**)",
+      "Grep(~/.config/ping-assistant/**)",
+      "Glob(~/.config/ping-assistant/**)",
+      "Read(//Users/ilebedyuk/.config/ping-assistant/**)",
+      "Grep(//Users/ilebedyuk/.config/ping-assistant/**)",
+      "Glob(//Users/ilebedyuk/.config/ping-assistant/**)",
       "Edit",
       "Write",
       "NotebookEdit",
       "WebFetch"
     ]
+  },
+  "enabledPlugins": {
+    "atlassian@claude-plugins-official": true
   }
 }
