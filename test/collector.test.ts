@@ -52,13 +52,14 @@ test('first tick sets cursors to now and returns nothing', async () => {
   expect(out).toEqual([])
   expect(state.cursors['hist:D1']).toBe(NOW_TS)
   expect(state.cursors['hist:C1']).toBe(NOW_TS)
-  expect(state.cursors.search).toBe('2026-10-19')
+  expect(state.cursors.search).toBe(NOW_TS)
+  expect(state.cursors.lastTick).toBe(NOW_TS)
   expect(slack.calls).toEqual([])
 })
 
 test('dm message is returned with source im and cursor advanced', async () => {
   slack.dms = [{ id: 'D1', type: 'im' }]
-  state.cursors = { 'hist:D1': '100.000000', 'hist:C1': '100.000000', search: '2026-10-19' }
+  state.cursors = { 'hist:D1': '100.000000', 'hist:C1': '100.000000', search: '1.0' }
   slack.hist = { D1: [{ ts: '101.5', user: 'U2', text: 'hi' }, { ts: '102.5', user: 'ME', text: 'mine' }] }
   const out = await make().tick(NOW)
   expect(out.map((o) => [o.msg.ts, o.source, o.msg.user])).toEqual([['101.5', 'im', 'U2'], ['102.5', 'im', 'ME']])
@@ -69,22 +70,23 @@ test('dm message is returned with source im and cursor advanced', async () => {
 
 test('mention found by search is deduped against msgIndex and other sources', async () => {
   slack.dms = [{ id: 'D1', type: 'im' }]
-  state.cursors = { 'hist:D1': '100.000000', 'hist:C1': '100.000000', search: '2026-10-19' }
+  state.cursors = { 'hist:D1': '100.000000', 'hist:C1': '100.000000', search: '1.0' }
   state.msgIndex['C9:1792410000.1'] = 'i1'
   slack.hist = { D1: [{ ts: '1792410100.2', user: 'U2', text: 'dm mention' }] }
   slack.mentions = [
+    { ts: '0.5', channel: 'C9', user: 'U2', text: 'older than floor' },
     { ts: '1792410000.1', channel: 'C9', user: 'U2', text: 'known' },
     { ts: '1792410100.2', channel: 'D1', user: 'U2', text: 'dm mention' },
     { ts: '1792410200.3', channel: 'C9', user: 'U3', text: 'new' },
   ]
   const out = await make().tick(NOW)
   expect(out.map((o) => [o.msg.ts, o.source])).toEqual([['1792410100.2', 'im'], ['1792410200.3', 'mention']])
-  expect(slack.searchArgs).toEqual(['2026-10-18'])
-  expect(state.cursors.search).toBe('2026-10-19')
+  expect(slack.searchArgs).toEqual(['1969-12-30'])
+  expect(state.cursors.search).toBe('1792410200.3')
 })
 
 test('watched channel thread replies are fetched', async () => {
-  state.cursors = { 'hist:C1': '100.000000', search: '2026-10-19' }
+  state.cursors = { 'hist:C1': '100.000000', search: '1.0' }
   slack.hist = { C1: [{ ts: '150.0', thread_ts: '150.0', reply_count: 1, user: 'U2', text: 'root' }] }
   slack.repl = { 'C1:150.0': [{ ts: '150.0', thread_ts: '150.0', user: 'U2', text: 'root' }, { ts: '160.0', thread_ts: '150.0', user: 'U3', text: 'reply' }] }
   state.watchedThreads['C2:5.0'] = { until: NOW + 1 }
@@ -103,7 +105,7 @@ test('watched channel thread replies are fetched', async () => {
 
 test('subtypes message_changed/channel_join/bot_message are skipped; thread_broadcast kept', async () => {
   slack.dms = [{ id: 'D1', type: 'im' }]
-  state.cursors = { 'hist:D1': '1.0', 'hist:C1': '1.0', search: '2026-10-19' }
+  state.cursors = { 'hist:D1': '1.0', 'hist:C1': '1.0', search: '1.0' }
   slack.hist = {
     D1: [
       { ts: '2.0', subtype: 'message_changed', text: '' },
@@ -121,7 +123,7 @@ test('subtypes message_changed/channel_join/bot_message are skipped; thread_broa
 
 test('failing source keeps its cursor and does not block others', async () => {
   slack.dms = [{ id: 'D1', type: 'im' }, { id: 'D2', type: 'im' }]
-  state.cursors = { 'hist:D1': '1.0', 'hist:D2': '1.0', 'hist:C1': '1.0', search: '2026-10-19' }
+  state.cursors = { 'hist:D1': '1.0', 'hist:D2': '1.0', 'hist:C1': '1.0', search: '1.0' }
   slack.failHistory.add('D1')
   slack.hist = { D2: [{ ts: '2.0', user: 'U2', text: 'ok' }] }
   const out = await make().tick(NOW)
@@ -129,4 +131,95 @@ test('failing source keeps its cursor and does not block others', async () => {
   expect(state.cursors['hist:D1']).toBe('1.0')
   expect(state.cursors['hist:D2']).toBe('2.0')
   expect(stderr).toHaveBeenCalledWith('ping-assistant: im D1 failed: boom\n')
+})
+
+const T = (n: number) => `${NOW / 1000 - 5000 + n}.000000`
+const base = { 'hist:C1': '100.000000', search: '1.0' }
+
+test('reply in a later tick to a root that had none is returned', async () => {
+  state.cursors = { 'hist:C1': T(0), search: '1.0' }
+  slack.hist = { C1: [{ ts: T(50), user: 'U2', text: 'root' }] }
+  const c = make()
+  expect((await c.tick(NOW)).map((o) => o.msg.ts)).toEqual([T(50)])
+  expect(state.cursors[`thr:C1:${T(50)}`]).toBe(T(50))
+  slack.hist = {}
+  slack.repl = { [`C1:${T(50)}`]: [{ ts: T(60), thread_ts: T(50), user: 'U3', text: 'reply' }] }
+  const out = await c.tick(NOW + 60_000)
+  expect(out.map((o) => [o.msg.ts, o.source, o.msg.threadTs])).toEqual([[T(60), 'channel', T(50)]])
+  expect(state.cursors[`thr:C1:${T(50)}`]).toBe(T(60))
+})
+
+test('followUpDays horizon: old thread cursors are pruned and not fetched', async () => {
+  const oldTs = `${NOW / 1000 - 8 * 86400}.000000`
+  const freshTs = `${NOW / 1000 - 6 * 86400}.000000`
+  state.cursors = { ...base, [`thr:C1:${oldTs}`]: oldTs, [`thr:C1:${freshTs}`]: freshTs }
+  await make().tick(NOW)
+  expect(state.cursors[`thr:C1:${oldTs}`]).toBeUndefined()
+  expect(state.cursors[`thr:C1:${freshTs}`]).toBe(freshTs)
+  expect(slack.calls.filter((c) => c.startsWith('replies'))).toEqual([`replies C1:${freshTs} ${freshTs}`])
+})
+
+test('a DM that appears after the first run is read from lastTick', async () => {
+  const c = make()
+  await c.tick(NOW)
+  slack.dms = [{ id: 'D9', type: 'im' }]
+  slack.hist = { D9: [{ ts: `${NOW / 1000 + 5}.000100`, user: 'U2', text: 'first!' }] }
+  const out = await c.tick(NOW + 60_000)
+  expect(out.map((o) => [o.msg.channel, o.source])).toEqual([['D9', 'im']])
+  expect(slack.calls).toContain(`history D9 ${NOW_TS}`)
+})
+
+test('watched thread without a cursor starts from lastTick', async () => {
+  state.cursors = { ...base, lastTick: '100.000000' }
+  state.watchedThreads['C2:5.0'] = { until: NOW + 1 }
+  slack.repl['C2:5.0'] = [{ ts: '110.0', thread_ts: '5.0', user: 'U4', text: 'late' }]
+  const out = await make().tick(NOW)
+  expect(out.map((o) => [o.msg.ts, o.source])).toEqual([['110.0', 'followup']])
+  expect(slack.calls).toContain('replies C2:5.0 100.000000')
+})
+
+test('search floor is a ts: crosses UTC midnight and ignores older hits', async () => {
+  const floor = `${Date.UTC(2026, 9, 19, 23, 59, 30) / 1000}.000000`
+  const hit = `${Date.UTC(2026, 9, 20, 0, 0, 10) / 1000}.000000`
+  state.cursors = { ...base, search: floor }
+  slack.mentions = [{ ts: '5.0', channel: 'C9', user: 'U2', text: 'old' }, { ts: hit, channel: 'C9', user: 'U2', text: 'new' }]
+  const out = await make().tick(Date.UTC(2026, 9, 20, 0, 1, 0))
+  expect(out.map((o) => o.msg.ts)).toEqual([hit])
+  expect(slack.searchArgs).toEqual(['2026-10-17'])
+  expect(state.cursors.search).toBe(hit)
+  slack.mentions = [{ ts: hit, channel: 'C9', user: 'U2', text: 'new' }]
+  expect(await make().tick(Date.UTC(2026, 9, 20, 0, 2, 0))).toEqual([])
+})
+
+test('failing file download is soft: file recorded without path, message kept', async () => {
+  state.cursors = { ...base }
+  slack.hist = { C1: [{ ts: '150.0', user: 'U2', text: 'f', files: [{ id: 'F1', name: 'a.png', url_private_download: 'u' }] }] }
+  slack.downloadFile = async () => { throw new Error('nope') }
+  const out = await make().tick(NOW)
+  expect(out[0]!.msg.files).toEqual([{ id: 'F1', name: 'a.png' }])
+  expect(state.cursors['hist:C1']).toBe('150.0')
+})
+
+test('downloaded file path is filesDir/channel-ts-name', async () => {
+  state.cursors = { ...base }
+  slack.hist = { C1: [{ ts: '150.0', user: 'U2', text: 'f', files: [{ id: 'F1', name: 'a.png', url_private_download: 'u' }] }] }
+  const dests: string[] = []
+  slack.downloadFile = async (_u?: string, dest?: string) => { dests.push(dest!) }
+  const out = await make().tick(NOW)
+  expect(dests).toEqual(['/tmp/ping-assistant-files-test/C1-150.0-a.png'])
+  expect(out[0]!.msg.files).toEqual([{ id: 'F1', name: 'a.png', path: dests[0] }])
+})
+
+test('failing thread does not block the rest of the channel source', async () => {
+  state.cursors = { 'hist:C1': T(0), search: '1.0', [`thr:C1:${T(40)}`]: T(40), [`thr:C1:${T(41)}`]: T(41) }
+  slack.hist = { C1: [{ ts: T(50), user: 'U2', text: 'new' }] }
+  slack.repl = { [`C1:${T(41)}`]: [{ ts: T(42), thread_ts: T(41), user: 'U3', text: 'ok' }] }
+  const orig = slack.replies.bind(slack)
+  slack.replies = async (c: string, t: string, o?: string) => { if (t === T(40)) throw new Error('thread boom'); return orig(c, t, o) }
+  const out = await make().tick(NOW)
+  expect(out.map((o) => o.msg.ts)).toEqual([T(42), T(50)])
+  expect(state.cursors[`thr:C1:${T(40)}`]).toBe(T(40))
+  expect(state.cursors[`thr:C1:${T(41)}`]).toBe(T(42))
+  expect(state.cursors['hist:C1']).toBe(T(50))
+  expect(stderr).toHaveBeenCalledWith(`ping-assistant: thread C1:${T(40)} failed: thread boom\n`)
 })

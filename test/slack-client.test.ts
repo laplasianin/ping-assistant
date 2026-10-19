@@ -99,3 +99,11 @@ test('channelName returns личка for IM, name otherwise', async () => {
   expect(await c.channelName('D1')).toBe('личка')
   expect(await c.channelName('C1')).toBe('dev')
 })
+
+test('searchMentions parses thread_ts from the match permalink', async () => {
+  const { fetchImpl } = fake([
+    json({ ok: true, messages: { matches: [{ ts: '2', user: 'U2', text: 'x', channel: { id: 'C1' }, permalink: 'https://x.slack.com/archives/C1/p2?thread_ts=1.5&cid=C1' }, { ts: '3', user: 'U2', text: 'y', channel: { id: 'C1' }, permalink: 'https://x.slack.com/archives/C1/p3' }], paging: { page: 1, pages: 1 } } }),
+  ])
+  const out = await new SlackClient('t', fetchImpl).searchMentions('U1', '2026-10-01')
+  expect(out.map((m) => m.thread_ts)).toEqual(['1.5', undefined])
+})

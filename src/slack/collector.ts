@@ -21,7 +21,7 @@ const log = (source: string, err: unknown): void => {
   process.stderr.write(`ping-assistant: ${source} failed: ${err instanceof Error ? err.message : String(err)}\n`)
 }
 
-type Read = { raws: RawMsg[]; cursors: Record<string, string> }
+type Read = { raws: RawMsg[]; cursors: Record<string, string>; remove?: string[] }
 
 export class Collector {
   constructor(
@@ -38,7 +38,7 @@ export class Collector {
 
     const run = async (name: string, source: ItemSource, read: () => Promise<Read>): Promise<void> => {
       try {
-        const { raws, cursors } = await read()
+        const { raws, cursors, remove } = await read()
         const built: Collected[] = []
         const local = new Set<string>()
         for (const raw of raws) {
@@ -51,6 +51,7 @@ export class Collector {
         for (const k of local) seen.add(k)
         out.push(...built)
         Object.assign(this.state.cursors, cursors)
+        for (const k of remove ?? []) delete this.state.cursors[k]
       } catch (err) {
         log(name, err)
       }
@@ -59,7 +60,7 @@ export class Collector {
     for (const dm of await this.listDms()) {
       await run(`${dm.type} ${dm.id}`, dm.type, () => this.readHistory(dm.id, nowTs))
     }
-    await run('mentions', 'mention', () => this.readMentions(now))
+    await run('mentions', 'mention', () => this.readMentions(nowTs))
     for (const channel of this.cfg.watchChannels) {
       await run(`channel ${channel}`, 'channel', () => this.readChannel(channel, nowTs, now))
     }
@@ -69,6 +70,7 @@ export class Collector {
       await run(`thread ${key}`, 'followup', () => this.readThread(channel, threadTs, nowTs))
     }
 
+    this.state.cursors.lastTick = nowTs
     return out.sort((a, b) => cmpTs(a.msg.ts, b.msg.ts))
   }
 
@@ -80,55 +82,71 @@ export class Collector {
     return raws.map((m) => ({ ...m, channel }))
   }
 
+  /** A source without a cursor starts at the previous tick; only the very first run starts at now. */
+  private start(key: string): string | undefined {
+    return this.state.cursors[key] ?? this.state.cursors.lastTick
+  }
+
   private async readHistory(channel: string, nowTs: string): Promise<Read> {
     const key = `hist:${channel}`
-    const cursor = this.state.cursors[key]
+    const cursor = this.start(key)
     if (!cursor) return { raws: [], cursors: { [key]: nowTs } }
     const raws = this.withChannel(await this.slack.history(channel, cursor), channel)
     return { raws, cursors: { [key]: maxTs(cursor, ...raws.map((m) => m.ts))! } }
   }
 
-  private async readThread(channel: string, threadTs: string, nowTs: string, defaultCursor?: string): Promise<Read> {
+  private async readThread(channel: string, threadTs: string, nowTs: string): Promise<Read> {
     const key = `thr:${channel}:${threadTs}`
-    const cursor = this.state.cursors[key] ?? defaultCursor
+    const cursor = this.start(key)
     if (!cursor) return { raws: [], cursors: { [key]: nowTs } }
     const raws = this.withChannel(await this.slack.replies(channel, threadTs, cursor), channel)
-    return { raws, cursors: { [key]: maxTs(cursor, threadTs, ...raws.map((m) => m.ts))! } }
+    return { raws, cursors: { [key]: maxTs(cursor, ...raws.map((m) => m.ts))! } }
   }
 
-  private async readMentions(now: number): Promise<Read> {
-    const cursor = this.state.cursors.search
-    const today = isoDate(now)
-    if (!cursor) return { raws: [], cursors: { search: today } }
-    // Slack's `after:` is exclusive, so query from the day before the (inclusive) cursor date.
-    const startOfCursor = Date.parse(`${cursor}T00:00:00Z`) / 1000
-    const all = await this.slack.searchMentions(this.cfg.userId, isoDate(Date.parse(`${cursor}T00:00:00Z`) - DAY_MS))
-    const raws = all.filter((m) => Number(m.ts) >= startOfCursor)
-    const latest = maxTs(undefined, ...raws.map((m) => m.ts))
-    return { raws, cursors: { search: latest ? isoDate(Number(latest.split('.')[0]) * 1000) : cursor } }
+  private async readMentions(nowTs: string): Promise<Read> {
+    const floor = this.start('search')
+    if (!floor) return { raws: [], cursors: { search: nowTs } }
+    // Slack evaluates `after:` in the user's local zone: query two days earlier, filter by exact ts.
+    const after = isoDate(Number(floor.split('.')[0]) * 1000 - 2 * DAY_MS)
+    const raws = (await this.slack.searchMentions(this.cfg.userId, after)).filter((m) => cmpTs(m.ts, floor) > 0)
+    return { raws, cursors: { search: maxTs(floor, ...raws.map((m) => m.ts))! } }
   }
 
   private async readChannel(channel: string, nowTs: string, now: number): Promise<Read> {
-    const histKey = `hist:${channel}`
-    const prev = this.state.cursors[histKey]
-    if (!prev) return { raws: [], cursors: { [histKey]: nowTs } }
     const hist = await this.readHistory(channel, nowTs)
     const raws = [...hist.raws]
     const cursors = { ...hist.cursors }
+    const remove: string[] = []
+    if (!this.state.cursors[`hist:${channel}`] && !this.state.cursors.lastTick) return hist
 
-    const threads = new Set<string>()
-    for (const m of hist.raws) if (m.thread_ts || (m.reply_count ?? 0) > 0) threads.add(m.thread_ts ?? m.ts)
-    // Threads already followed, still active within followUpDays (cursor = last reply seen).
-    const horizon = `${Math.floor((now - this.cfg.followUpDays * DAY_MS) / 1000)}.000000`
+    // Any top-level message can become a thread root: track every one from the moment it is seen.
     const prefix = `thr:${channel}:`
-    for (const [k, v] of Object.entries(this.state.cursors)) if (k.startsWith(prefix) && cmpTs(v, horizon) >= 0) threads.add(k.slice(prefix.length))
-
-    for (const threadTs of threads) {
-      const thr = await this.readThread(channel, threadTs, nowTs, prev)
-      raws.push(...thr.raws)
-      Object.assign(cursors, thr.cursors)
+    for (const m of hist.raws) {
+      const key = `${prefix}${m.thread_ts ?? m.ts}`
+      if (!(key in this.state.cursors)) cursors[key] = m.thread_ts ?? m.ts
     }
-    return { raws, cursors }
+
+    const horizon = `${Math.floor((now - this.cfg.followUpDays * DAY_MS) / 1000)}.000000`
+    const tracked = new Set<string>(Object.keys(cursors).filter((k) => k.startsWith(prefix)))
+    for (const k of Object.keys(this.state.cursors)) {
+      if (!k.startsWith(prefix)) continue
+      const threadTs = k.slice(prefix.length)
+      if (cmpTs(threadTs, horizon) < 0 && !this.state.watchedThreads[`${channel}:${threadTs}`]) remove.push(k)
+      else tracked.add(k)
+    }
+
+    for (const key of tracked) {
+      const threadTs = key.slice(prefix.length)
+      const cursor = cursors[key] ?? this.state.cursors[key]!
+      try {
+        const replies = this.withChannel(await this.slack.replies(channel, threadTs, cursor), channel)
+        raws.push(...replies)
+        cursors[key] = maxTs(cursor, ...replies.map((m) => m.ts))!
+      } catch (err) {
+        log(`thread ${channel}:${threadTs}`, err)
+      }
+    }
+    return { raws, cursors, remove }
   }
 
   private async soft<T>(what: string, fn: () => Promise<T>): Promise<T | undefined> {
@@ -151,8 +169,13 @@ export class Collector {
       if (!f.url_private_download) { files.push({ id: f.id, name: f.name }); continue }
       mkdirSync(this.filesDir, { recursive: true })
       const path = join(this.filesDir, `${channel}-${ts}-${f.name.replace(/[\\/]/g, '_')}`)
-      await this.slack.downloadFile(f.url_private_download, path)
-      files.push({ id: f.id, name: f.name, path })
+      try {
+        await this.slack.downloadFile(f.url_private_download, path)
+        files.push({ id: f.id, name: f.name, path })
+      } catch (err) {
+        log(`file ${f.id}`, err)
+        files.push({ id: f.id, name: f.name })
+      }
     }
     const permalink = await this.soft(`permalink ${channel}:${ts}`, () => this.slack.permalink(channel, ts))
     return {
