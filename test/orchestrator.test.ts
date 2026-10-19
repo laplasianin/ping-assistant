@@ -7,7 +7,7 @@ import type { Config } from '../src/config'
 import { slackify } from '../src/format'
 import { Orchestrator } from '../src/orchestrator'
 import type { RawMsg, SlackClient } from '../src/slack/client'
-import type { Collected } from '../src/slack/collector'
+import { Collector, type Collected } from '../src/slack/collector'
 import { emptyState, type SlackMsg, type State, type StateStore } from '../src/state'
 import { TelegramBot, type TelegramApi } from '../src/telegram/bot'
 
@@ -30,6 +30,12 @@ class FakeSlack {
     return (this.hist[channel] ?? []).filter((m) => Number(m.ts) < Number(latest)).slice(-limit)
   }
   failReplies = false
+  // Surface the real Collector needs beyond what the Orchestrator uses.
+  async listDms() { return [] }
+  async searchMentions() { return [] as RawMsg[] }
+  async channelName(id: string) { return `name-${id}` }
+  async userName(id: string) { return `User ${id}` }
+  async downloadFile() {}
   async permalink(channel: string, ts: string) { return `https://slack/${channel}/${ts}` }
   async postMessage(channel: string, text: string, threadTs?: string) {
     this.posted.push({ channel, text, ...(threadTs ? { threadTs } : {}) })
@@ -81,7 +87,10 @@ let env: Awaited<ReturnType<typeof setup>>
 beforeEach(() => { stderr = spyOn(process.stderr, 'write').mockImplementation(() => true) })
 afterEach(() => { env?.orch.stop(); stderr.mockRestore() })
 
-async function setup(cfgOverrides: Partial<Config> = {}, state: State = emptyState()) {
+async function setup(
+  cfgOverrides: Partial<Config> = {}, state: State = emptyState(),
+  realCollector?: (slack: FakeSlack, cfg: Config) => Collector,
+) {
   const cfg = { ...baseCfg, ...cfgOverrides }
   const slack = new FakeSlack()
   const api = new FakeApi()
@@ -92,7 +101,7 @@ async function setup(cfgOverrides: Partial<Config> = {}, state: State = emptySta
   let clock = T0
   let channel!: Channel
   const orch = new Orchestrator({
-    cfg, store, state, slack: slack as unknown as SlackClient, collector: collector as never, tg,
+    cfg, store, state, slack: slack as unknown as SlackClient, collector: (realCollector?.(slack, cfg) ?? collector) as never, tg,
     channel: { notify: (c: string, m: Record<string, string>) => channel.notify(c, m) } as Channel, now: () => clock,
   })
   channel = new Channel(orch.handlers())
@@ -513,4 +522,44 @@ test('top-level DM item gets recent history before it as context', async () => {
     { ts: '95.000000', user: 'ME', text: 'мой вопрос' },
     { ts: '99.000000', user: 'U2', userName: 'User U2', text: 'контекст' },
   ])
+})
+
+test('reply in a thread ping-assistant answered in creates item 1.1 with full thread context and is notified', async () => {
+  const ts = (sec: number) => `${T0 / 1000 + sec}.000000`
+  const root = ts(-60)
+  const state = emptyState()
+  state.cursors = { lastTick: ts(-100), 'hist:C1': ts(-100), search: ts(-100), [`thr:C1:${root}`]: root }
+  const e = await setup({}, state, (slack, cfg) => new Collector(slack as never, cfg, state, '/tmp/ping-assistant-test/files'))
+  const mine = ts(10)
+  e.slack.postMessage = async (channel, text, threadTs) => { e.slack.posted.push({ channel, text, ...(threadTs ? { threadTs } : {}) }); return { ts: mine } }
+  const raw = (t: string, user: string, text: string) => ({ ts: t, thread_ts: root, user, text })
+  e.slack.repl[`C1:${root}`] = [raw(root, 'U3', 'root'), raw(ts(-30), 'U2', 'Почему падает сборка?')]
+
+  await e.orch.tick() // collects the question
+  e.advance(91_000)
+  await e.orch.tick() // matures it
+  await e.flush()
+  expect(e.notes.map((n) => n.meta.item_id)).toEqual(['1'])
+  await propose(e, ['Починю сегодня'])
+  await e.callback('pa:choose:1:1', e.api.last().id)
+  expect(e.slack.posted).toHaveLength(1)
+  expect(e.state.items['1']!.status).toBe('sent')
+
+  // The thread now holds our message and a foreign reply to it.
+  const reply = ts(500)
+  e.slack.repl[`C1:${root}`]!.push(raw(mine, 'ME', 'Починю сегодня'), raw(reply, 'U4', 'Спасибо, а когда?'))
+  e.advance(60_000)
+  await e.orch.tick()
+  const followup = e.state.items['1.1']!
+  expect(followup).toMatchObject({ id: '1.1', seq: 1, sub: 1, source: 'followup', status: 'settling', author: 'U4' })
+  expect(e.slack.posted).toHaveLength(1) // nothing is sent on its own
+
+  e.advance(91_000)
+  await e.orch.tick()
+  await e.flush()
+  expect(followup.status).toBe('triage')
+  expect(e.notes.map((n) => [n.meta.kind, n.meta.item_id])).toEqual([['item', '1'], ['item', '1.1']])
+  const body = JSON.parse(e.notes[1]!.content)
+  expect(body).toMatchObject({ id: '1.1', source: 'followup', threadTs: root, messages: [{ ts: reply, text: 'Спасибо, а когда?' }] })
+  expect(body.context.map((m: SlackMsg) => [m.ts, m.text])).toEqual([[root, 'root'], [ts(-30), 'Почему падает сборка?'], [mine, 'Починю сегодня']])
 })

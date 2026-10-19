@@ -223,3 +223,26 @@ test('failing thread does not block the rest of the channel source', async () =>
   expect(state.cursors['hist:C1']).toBe(T(50))
   expect(stderr).toHaveBeenCalledWith(`ping-assistant: thread C1:${T(40)} failed: thread boom\n`)
 })
+
+test('watched thread expires after followUpDays: not polled, entry and old cursor removed', async () => {
+  state.cursors = { ...base, 'thr:C2:5.0': '5.0' }
+  state.watchedThreads['C2:5.0'] = { until: NOW - 1 }
+  state.watchedThreads['C2:6.0'] = { until: NOW + 1 }
+  slack.repl['C2:5.0'] = [{ ts: '110.0', thread_ts: '5.0', user: 'U4', text: 'too late' }]
+  const out = await make().tick(NOW)
+  expect(out).toEqual([])
+  expect(state.watchedThreads).toEqual({ 'C2:6.0': { until: NOW + 1 } })
+  expect(state.cursors['thr:C2:5.0']).toBeUndefined()
+  expect(slack.calls.filter((c) => c.startsWith('replies')).some((c) => c.includes('C2:5.0'))).toBe(false)
+})
+
+test('expired watched channel thread keeps its cursor until it is older than the horizon', async () => {
+  const recent = `${NOW / 1000 - 2 * 86400}.000000`
+  state.cursors = { ...base, [`thr:C1:${recent}`]: recent }
+  state.watchedThreads[`C1:${recent}`] = { until: NOW - 1 }
+  await make().tick(NOW)
+  expect(state.watchedThreads).toEqual({})
+  expect(state.cursors[`thr:C1:${recent}`]).toBe(recent) // still a normal tracked channel thread
+  await make().tick(NOW + 6 * 86400_000)
+  expect(state.cursors[`thr:C1:${recent}`]).toBeUndefined()
+})

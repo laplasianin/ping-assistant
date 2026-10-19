@@ -35,6 +35,7 @@ export class Collector {
     const nowTs = `${Math.floor(now / 1000)}.000000`
     const out: Collected[] = []
     const seen = new Set<string>()
+    this.expireWatched(now)
 
     const run = async (name: string, source: ItemSource, read: () => Promise<Read>): Promise<void> => {
       try {
@@ -72,6 +73,18 @@ export class Collector {
 
     this.state.cursors.lastTick = nowTs
     return out.sort((a, b) => cmpTs(a.msg.ts, b.msg.ts))
+  }
+
+  /** Drops watched threads whose follow-up window has passed, along with the cursor nobody else will track. */
+  private expireWatched(now: number): void {
+    const horizon = `${Math.floor((now - this.cfg.followUpDays * DAY_MS) / 1000)}.000000`
+    for (const [key, { until }] of Object.entries(this.state.watchedThreads)) {
+      if (until >= now) continue
+      delete this.state.watchedThreads[key]
+      const i = key.lastIndexOf(':')
+      const [channel, threadTs] = [key.slice(0, i), key.slice(i + 1)]
+      if (cmpTs(threadTs, horizon) < 0 || !this.cfg.watchChannels.includes(channel)) delete this.state.cursors[`thr:${key}`]
+    }
   }
 
   private async listDms(): Promise<{ id: string; type: 'im' | 'mpim' }[]> {
