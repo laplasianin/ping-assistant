@@ -181,3 +181,35 @@ test('listDms returns the IM counterpart user', async () => {
   const { fetchImpl } = fake([json({ ok: true, channels: [{ id: 'D1', is_im: true, user: 'U7' }, { id: 'G1', is_mpim: true }] })])
   expect(await new SlackClient('t', fetchImpl).listDms()).toEqual([{ id: 'D1', type: 'im', user: 'U7' }, { id: 'G1', type: 'mpim' }])
 })
+
+test('searchDms queries is:dm newest first, keeps own messages and stops paging below the floor', async () => {
+  const { fetchImpl, calls } = fake([
+    json({ ok: true, messages: { matches: [
+      { ts: '30.0', user: 'U1', text: 'own', channel: { id: 'D1', is_im: true } },
+      { ts: '20.0', user: 'U2', text: 'r', channel: { id: 'D1', is_im: true }, permalink: 'https://x.slack.com/archives/D1/p20?thread_ts=15.0&cid=D1' },
+    ], paging: { page: 1, pages: 3 } } }),
+    json({ ok: true, messages: { matches: [
+      { ts: '12.0', user: 'U3', text: 'g', channel: { id: 'G1', is_mpim: true } },
+      { ts: '9.0', user: 'U3', text: 'old', channel: { id: 'G1', is_mpim: true } },
+    ], paging: { page: 2, pages: 3 } } }),
+  ])
+  const out = await new SlackClient('t', fetchImpl).searchDms('2026-10-17', '10.0')
+  expect(out.map((m) => [m.ts, m.channel, m.user, m.thread_ts, m.dm])).toEqual([
+    ['9.0', 'G1', 'U3', undefined, 'mpim'],
+    ['12.0', 'G1', 'U3', undefined, 'mpim'],
+    ['20.0', 'D1', 'U2', '15.0', 'im'],
+    ['30.0', 'D1', 'U1', undefined, 'im'],
+  ])
+  expect(calls).toHaveLength(2) // page 2 already reaches below the floor: page 3 is never fetched
+  const p = calls[0]!.url.searchParams
+  expect([p.get('query'), p.get('sort'), p.get('sort_dir'), p.get('count'), p.get('page')]).toEqual(['is:dm after:2026-10-17', 'timestamp', 'desc', '100', '1'])
+  expect(calls[1]!.url.searchParams.get('page')).toBe('2')
+})
+
+test('searchDms counts against the request budget', async () => {
+  const { fetchImpl, calls } = fake([])
+  const c = new SlackClient('t', fetchImpl)
+  c.resetBudget(0)
+  await expect(c.searchDms('2026-10-17', '1.0')).rejects.toBeInstanceOf(BudgetExceeded)
+  expect(calls).toHaveLength(0)
+})

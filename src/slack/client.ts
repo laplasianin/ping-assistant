@@ -37,6 +37,18 @@ function threadFromPermalink(permalink: string | undefined): string | undefined 
   }
 }
 
+type SearchMatch = Omit<RawMsg, 'channel'> & { channel?: { id: string; is_im?: boolean; is_mpim?: boolean } | string }
+
+/** search.messages matches as RawMsg: channel object → id, thread_ts from the permalink, DM kind in `dm`. */
+function searchMatches(res: SlackResponse): RawMsg[] {
+  return ((res.messages?.matches ?? []) as SearchMatch[]).map((m) => {
+    const threadTs = m.thread_ts ?? threadFromPermalink(m.permalink)
+    const ch = typeof m.channel === 'string' ? { id: m.channel } : m.channel
+    const dm = ch?.is_im ? 'im' : ch?.is_mpim ? 'mpim' : undefined
+    return { ...m, channel: ch?.id, ...(threadTs ? { thread_ts: threadTs } : {}), ...(dm ? { dm } : {}) }
+  })
+}
+
 export class SlackClient {
   constructor(
     private readonly token: string,
@@ -134,17 +146,32 @@ export class SlackClient {
     let pages = 1
     do {
       const res = await this.get('search.messages', { query: `<@${userId}> after:${afterDate}`, sort: 'timestamp', sort_dir: 'asc', count: 100, page })
-      for (const m of (res.messages?.matches ?? []) as (Omit<RawMsg, 'channel'> & { channel?: { id: string; is_im?: boolean; is_mpim?: boolean } | string })[]) {
-        if (m.user === userId) continue
-        const threadTs = m.thread_ts ?? threadFromPermalink(m.permalink)
-        const ch = typeof m.channel === 'string' ? { id: m.channel } : m.channel
-        const dm = ch?.is_im ? 'im' : ch?.is_mpim ? 'mpim' : undefined
-        out.push({ ...m, channel: ch?.id, ...(threadTs ? { thread_ts: threadTs } : {}), ...(dm ? { dm } : {}) })
-      }
+      for (const m of searchMatches(res)) if (m.user !== userId) out.push(m)
       pages = res.messages?.paging?.pages ?? 1
       page++
     } while (page <= pages)
     return out
+  }
+
+  /**
+   * Every IM message (the user's own included) after `afterDate`, oldest first. Pages newest-first and
+   * stops at the first page that reaches `floorTs`, so a tick normally costs one request; hits at or
+   * below the floor may still be returned and are the caller's to filter.
+   */
+  async searchDms(afterDate: string, floorTs: string): Promise<RawMsg[]> {
+    const out: RawMsg[] = []
+    let page = 1
+    let pages = 1
+    do {
+      const res = await this.get('search.messages', { query: `is:dm after:${afterDate}`, sort: 'timestamp', sort_dir: 'desc', count: 100, page })
+      const matches = searchMatches(res)
+      out.push(...matches)
+      const oldest = matches.at(-1)?.ts
+      if (oldest === undefined || Number(oldest) <= Number(floorTs)) break
+      pages = res.messages?.paging?.pages ?? 1
+      page++
+    } while (page <= pages)
+    return out.reverse()
   }
 
   async listDms(): Promise<{ id: string; type: 'im' | 'mpim'; user?: string }[]> {

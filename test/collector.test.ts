@@ -32,6 +32,9 @@ class FakeSlack {
     return this.repl[`${channel}:${threadTs}`] ?? []
   }
   async searchMentions(_user: string, after: string) { this.searchArgs.push(after); return this.mentions }
+  dmHits: RawMsg[] = []
+  dmSearchArgs: string[][] = []
+  async searchDms(after: string, floor: string) { this.spend(); this.dmSearchArgs.push([after, floor]); return this.dmHits }
   async channelName(id: string) { return `name-${id}` }
   async userName(id: string) { return `User ${id}` }
   async permalink(c: string, ts: string) { return `https://slack/${c}/${ts}` }
@@ -318,8 +321,8 @@ test('search floor trails the newest hit by 600s so a late-indexed mention is st
 
 const recent = (s: number) => `${NOW / 1000 + s}.000000`
 
-test('quiet DMs are swept every 10th tick; DMs with real recent activity and new ones every tick', async () => {
-  slack.dms = [{ id: 'D1', type: 'im' }, { id: 'D2', type: 'im' }, { id: 'D3', type: 'mpim' }]
+test('quiet MPIMs are swept every 10th tick; MPIMs with real recent activity and new DMs every tick', async () => {
+  slack.dms = [{ id: 'D1', type: 'mpim' }, { id: 'D2', type: 'mpim' }, { id: 'D3', type: 'mpim' }]
   state.cursors = {
     'hist:C1': '100.000000', search: '1.0', lastTick: recent(-60),
     'hist:D1': recent(-3600), 'hist:D2': recent(-3600), // D2's cursor is only a first-run stamp
@@ -345,12 +348,12 @@ test('a DM read that returns messages marks it active', async () => {
 })
 
 test('request budget: mentions and channels go first; remaining DMs are deferred with cursors untouched', async () => {
-  slack.dms = [{ id: 'D1', type: 'im' }, { id: 'D2', type: 'im' }]
+  slack.dms = [{ id: 'D1', type: 'mpim' }, { id: 'D2', type: 'mpim' }]
   state.cursors = { 'hist:D1': recent(-100), 'hist:D2': recent(-100), 'hist:C1': '1.0', search: '1.0' }
   state.dmActivity = { D1: recent(-100), D2: recent(-100) }
   state.tickCount = 1
   slack.hist = { C1: [{ ts: recent(-200), user: 'U4', text: 'channel' }], D1: [{ ts: recent(-50), user: 'U2', text: 'ok' }], D2: [{ ts: recent(-40), user: 'U2', text: 'later' }] }
-  slack.budget = 3 // C1 + listDms + D1
+  slack.budget = 3 // C1 + listDms + D1 (no lastTick: the dm search is in its first-run mode and costs nothing)
   const out = await make().tick(NOW)
   expect(out.map((o) => o.msg.text)).toEqual(['channel', 'ok'])
   expect(state.cursors).toMatchObject({ 'hist:D1': recent(-50), 'hist:D2': recent(-100), 'hist:C1': recent(-200) })
@@ -364,7 +367,7 @@ test('request budget: mentions and channels go first; remaining DMs are deferred
 
 test('60 quiet DMs against a budget of 40: the sweep resumes round-robin, so DM #55 is read', async () => {
   const id = (n: number) => `D${String(n).padStart(2, '0')}`
-  slack.dms = Array.from({ length: 60 }, (_, n) => ({ id: id(n), type: 'im' as const }))
+  slack.dms = Array.from({ length: 60 }, (_, n) => ({ id: id(n), type: 'mpim' as const }))
   state.cursors = { 'hist:C1': '1.0', search: '1.0', lastTick: recent(-60) }
   for (let n = 0; n < 60; n++) state.cursors[`hist:${id(n)}`] = recent(-2 * 86400)
   slack.hist = { [id(55)]: [{ ts: recent(-10), user: 'U2', text: 'ау, ты тут?' }] }
@@ -460,4 +463,148 @@ test('selfDmTest: the self-DM is read every tick even without recent activity', 
   quiet()
   await make({ ...cfg, dryRun: true }).tick(NOW) // without selfDmTest the self-DM is just another quiet DM
   expect(dmReads()).toEqual([])
+})
+
+// ---- DM discovery via search.messages `is:dm`
+
+const hit = (channel: string, s: number, user = 'U2', dm: 'im' | 'mpim' = 'im'): RawMsg => ({ ts: recent(s), channel, user, text: 'hit', dm })
+const dmReads = () => slack.calls.filter((c) => c.startsWith('history D') || c.startsWith('history G')).map((c) => c.split(' ')[1])
+const quietDms = (ids: string[]) => {
+  state.cursors = { 'hist:C1': '100.000000', search: '1.0', lastTick: recent(-60), dmsearch: recent(-60) }
+  for (const id of ids) state.cursors[`hist:${id}`] = recent(-3 * 86400)
+  state.tickCount = 1 // neither sweep is due
+}
+
+test('dm search: a hit in a quiet IM reads that IM this tick and returns its message', async () => {
+  slack.dms = [{ id: 'D1', type: 'im' }, { id: 'D2', type: 'im' }]
+  quietDms(['D1', 'D2'])
+  slack.dmHits = [hit('D2', -20)]
+  slack.hist = { D2: [{ ts: recent(-20), user: 'U2', text: 'ау' }] }
+  const out = await make().tick(NOW)
+  expect(dmReads()).toEqual(['D2'])
+  expect(slack.calls).toContain(`history D2 ${recent(-3 * 86400)}`) // from its hist: cursor
+  expect(out.map((o) => [o.msg.channel, o.source, o.msg.text])).toEqual([['D2', 'im', 'ау']])
+  expect(slack.dmSearchArgs).toEqual([[isoDay(-2), recent(-60)]])
+  expect(state.cursors.dmsearch).toBe(recent(-60)) // newest hit - 600s is below the floor: the floor stays
+})
+
+const isoDay = (days: number) => new Date(NOW - 60_000 + days * 86400_000).toISOString().slice(0, 10)
+
+test('dm search: no hits → no IM history reads, even for IMs active in the last 24h', async () => {
+  slack.dms = [{ id: 'D1', type: 'im' }, { id: 'D2', type: 'im' }]
+  quietDms(['D1', 'D2'])
+  state.dmActivity = { D1: recent(-3600) }
+  await make().tick(NOW)
+  expect(dmReads()).toEqual([])
+  expect(slack.dmSearchArgs).toHaveLength(1)
+})
+
+test('dm search: the user\'s own message found via search is read and returned', async () => {
+  slack.dms = [{ id: 'D1', type: 'im' }]
+  quietDms(['D1'])
+  slack.dmHits = [hit('D1', -10, 'ME')]
+  slack.hist = { D1: [{ ts: recent(-10), user: 'ME', text: 'сам ответил' }] }
+  const out = await make().tick(NOW)
+  expect(out.map((o) => [o.msg.user, o.msg.text])).toEqual([['ME', 'сам ответил']])
+})
+
+test('dm search: hits at/below the floor, already ingested or already read are ignored', async () => {
+  slack.dms = [{ id: 'D1', type: 'im' }, { id: 'D2', type: 'im' }, { id: 'D3', type: 'im' }]
+  quietDms(['D1', 'D2', 'D3'])
+  state.cursors['hist:D3'] = recent(-30)
+  state.msgIndex[`D2:${recent(-40)}`] = 'i1'
+  slack.dmHits = [hit('D1', -60), hit('D1', -120), hit('D2', -40), hit('D3', -30)]
+  expect(await make().tick(NOW)).toEqual([])
+  expect(dmReads()).toEqual([])
+})
+
+test('dm search: the floor trails the newest hit by 600s; a late-indexed hit is still found', async () => {
+  slack.dms = [{ id: 'D1', type: 'im' }]
+  quietDms(['D1'])
+  state.cursors.dmsearch = recent(-3600)
+  slack.dmHits = [hit('D1', -30)]
+  slack.hist = { D1: [{ ts: recent(-30), user: 'U2', text: 'fast' }] }
+  const c = make()
+  await c.tick(NOW)
+  expect(state.cursors.dmsearch).toBe(recent(-630))
+  expect(state.cursors['hist:D1']).toBe(recent(-30))
+  // Posted after the cursor but indexed late: the hit is newer than the hist: cursor, so D1 is read again.
+  slack.calls = []
+  slack.dmHits = [hit('D1', -30), hit('D1', 5)]
+  slack.hist = { D1: [{ ts: recent(5), user: 'U3', text: 'late' }] }
+  const out = await c.tick(NOW + 60_000)
+  expect(out.map((o) => o.msg.text)).toEqual(['late'])
+  expect(dmReads()).toEqual(['D1'])
+})
+
+test('dm search: the first run sets the floor to now without calling search', async () => {
+  slack.dms = [{ id: 'D1', type: 'im' }]
+  await make().tick(NOW)
+  expect(slack.dmSearchArgs).toEqual([])
+  expect(state.cursors.dmsearch).toBe(NOW_TS)
+})
+
+test('dm search: an MPIM hit reads that MPIM this tick; MPIMs without hits keep the 24h tiering', async () => {
+  slack.dms = [{ id: 'G1', type: 'mpim' }, { id: 'G2', type: 'mpim' }, { id: 'G3', type: 'mpim' }]
+  quietDms(['G1', 'G2', 'G3'])
+  state.dmActivity = { G3: recent(-3600) }
+  slack.dmHits = [hit('G2', -15, 'U2', 'mpim')]
+  slack.hist = { G2: [{ ts: recent(-15), user: 'U2', text: 'group' }] }
+  const out = await make().tick(NOW)
+  expect(dmReads()).toEqual(['G2', 'G3'])
+  expect(out.map((o) => [o.msg.channel, o.source])).toEqual([['G2', 'mpim']])
+})
+
+test('dm search: a failing search falls back to reading IMs active in the last 24h; the floor stays', async () => {
+  slack.dms = [{ id: 'D1', type: 'im' }, { id: 'D2', type: 'im' }]
+  quietDms(['D1', 'D2'])
+  state.dmActivity = { D1: recent(-3600) }
+  slack.searchDms = async () => { throw new Error('invalid query') }
+  await make().tick(NOW)
+  expect(dmReads()).toEqual(['D1'])
+  expect(state.cursors.dmsearch).toBe(recent(-60))
+  expect(stderr).toHaveBeenCalledWith('ping-assistant: dm search failed: invalid query\n')
+})
+
+test('dm search: the floor does not advance while a hit DM read is deferred by the budget', async () => {
+  slack.dms = [{ id: 'D1', type: 'im' }]
+  quietDms(['D1'])
+  state.cursors.dmsearch = recent(-3600)
+  slack.dmHits = [hit('D1', -30)]
+  slack.hist = { D1: [{ ts: recent(-30), user: 'U2', text: 'later' }] }
+  slack.budget = 3 // C1 + listDms + search
+  expect(await make().tick(NOW)).toEqual([])
+  expect(state.cursors.dmsearch).toBe(recent(-3600))
+  slack.budget = Infinity
+  expect((await make().tick(NOW + 60_000)).map((o) => o.msg.text)).toEqual(['later'])
+})
+
+test('sweep: quiet IMs every 30th tick, quiet MPIMs every 10th', async () => {
+  slack.dms = [{ id: 'D1', type: 'im' }, { id: 'G1', type: 'mpim' }]
+  for (const [tick, reads] of [[10, ['G1']], [20, ['G1']], [30, ['D1', 'G1']], [31, []]] as const) {
+    slack.calls = []
+    quietDms(['D1', 'G1'])
+    state.tickCount = tick
+    await make().tick(NOW)
+    expect(dmReads().sort()).toEqual([...reads])
+  }
+})
+
+test('dm search: a thread-reply hit does not trigger a history read (history would not surface it)', async () => {
+  slack.dms = [{ id: 'D1', type: 'im' }]
+  quietDms(['D1'])
+  slack.dmHits = [{ ...hit('D1', -10), thread_ts: recent(-500) }]
+  await make().tick(NOW)
+  expect(dmReads()).toEqual([])
+})
+
+test('dm search: a hit DM whose read fails outright does not pin the floor', async () => {
+  slack.dms = [{ id: 'D1', type: 'im' }]
+  quietDms(['D1'])
+  state.cursors.dmsearch = recent(-3600)
+  slack.dmHits = [hit('D1', -30)]
+  slack.failHistory.add('D1')
+  await make().tick(NOW)
+  expect(state.cursors.dmsearch).toBe(recent(-630))
+  expect(state.cursors['hist:D1']).toBe(recent(-3 * 86400))
 })

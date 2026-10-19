@@ -14,8 +14,10 @@ export type TickResult = { collected: Collected[]; cursorUpdates: Record<string,
 
 const SKIP_SUBTYPES = new Set(['message_changed', 'message_deleted', 'channel_join', 'channel_leave', 'bot_message', 'channel_topic', 'channel_purpose'])
 const DAY_MS = 86_400_000
-/** Quiet DMs (no activity in 24h) are read on every DM_SWEEP_EVERY-th tick only. */
-const DM_SWEEP_EVERY = 10
+/** Quiet MPIMs (no activity in 24h) are read on every MPIM_SWEEP_EVERY-th tick only. */
+const MPIM_SWEEP_EVERY = 10
+/** IMs are read when the `is:dm` search finds something new; this sweep is only the safety net for a stale index. */
+const IM_SWEEP_EVERY = 30
 /** search.messages indexes with a lag: the floor trails the newest hit so late-indexed messages are still found. */
 const SEARCH_LAG_S = 600
 
@@ -38,6 +40,8 @@ const log = (source: string, err: unknown): void => {
 }
 
 type Read = { raws: RawMsg[]; cursors: Record<string, string>; remove?: string[] }
+/** One tick's DM search: the DMs to read now, and the floor to commit once they are read. */
+type Discovery = { active: Set<string>; floor: string }
 
 /** Commits a tick's cursors; a cursor never moves backwards (the orchestrator may have advanced it meanwhile). */
 export function applyCursors(state: State, r: Pick<TickResult, 'cursorUpdates' | 'removeCursors'>): void {
@@ -71,8 +75,9 @@ export class Collector {
     const tickNo = this.state.tickCount ?? 0
     this.state.tickCount = tickNo + 1
 
-    const run = async (name: string, source: ItemSource, read: () => Promise<Read>): Promise<void> => {
-      if (this.exhausted) { deferred++; return } // cursors untouched: read next tick
+    /** Resolves true when the source was read (its cursors staged), false when it failed or was deferred. */
+    const run = async (name: string, source: ItemSource, read: () => Promise<Read>): Promise<boolean> => {
+      if (this.exhausted) { deferred++; return false } // cursors untouched: read next tick
       try {
         const { raws, cursors, remove } = await read()
         const built: Collected[] = []
@@ -92,9 +97,11 @@ export class Collector {
         out.push(...built)
         Object.assign(cursorUpdates, cursors)
         removeCursors.push(...(remove ?? []))
+        return true
       } catch (err) {
-        if (err instanceof BudgetExceeded) { this.exhausted = true; deferred++; return }
+        if (err instanceof BudgetExceeded) { this.exhausted = true; deferred++; return false }
         log(name, err)
+        return false
       }
     }
 
@@ -111,29 +118,73 @@ export class Collector {
     }
 
     const dms = this.exhausted ? [] : await this.listDms()
-    const readDm = (dm: { id: string; type: 'im' | 'mpim' }) => run(`${dm.type} ${dm.id}`, dm.type, () => this.readDm(dm.id, nowTs))
-    const quiet: typeof dms = []
-    for (const dm of dms) {
-      if (this.state.cursors[`hist:${dm.id}`] && !this.recentlyActive(dm.id, now) && !this.isSelfTestDm(dm.id)) quiet.push(dm)
-      else await readDm(dm) // active, the selfDmTest DM, or new (a new DM on the very first run costs no request)
-    }
-    // Quiet DMs: a round-robin sweep every DM_SWEEP_EVERY ticks; one cut short by the budget resumes next tick
-    // after the last DM it read, so no DM is starved by those listed before it.
-    const after = this.state.dmSweepAfter
-    if (after !== undefined || tickNo % DM_SWEEP_EVERY === 0) {
-      const todo = quiet.sort((a, b) => (a.id < b.id ? -1 : 1)).filter((dm) => after === undefined || dm.id > after)
-      let finished = true
-      for (const dm of todo) {
-        await readDm(dm)
-        if (this.exhausted) { finished = false; break }
-        this.state.dmSweepAfter = dm.id
+    // One search per tick tells which DMs have something new; only those are read (mark-and-read: the hit
+    // only triggers the history read, so files, subtypes and ordering stay those of the history path).
+    let discovery: Discovery | undefined
+    if (dms.length && !this.exhausted) {
+      try { discovery = await this.discoverDms(nowTs) } catch (err) {
+        if (err instanceof BudgetExceeded) { this.exhausted = true; deferred++ } else log('dm search', err)
       }
-      if (finished) this.state.dmSweepAfter = undefined
     }
+    const readDm = (dm: { id: string; type: 'im' | 'mpim' }) => run(`${dm.type} ${dm.id}`, dm.type, () => this.readDm(dm.id, nowTs))
+    // IMs are hot only on a search hit (or, if the search failed, on 24h activity as before); MPIMs keep the
+    // 24h tiering because `is:dm` is not known to cover group DMs, and are also read on a hit.
+    const hot = (dm: { id: string; type: 'im' | 'mpim' }): boolean =>
+      !this.state.cursors[`hist:${dm.id}`] || this.isSelfTestDm(dm.id) || discovery?.active.has(dm.id) === true
+      || ((dm.type === 'mpim' || !discovery) && this.recentlyActive(dm.id, now))
+    const quiet: typeof dms = []
+    let hitsRead = true
+    for (const dm of dms) {
+      if (!hot(dm)) { quiet.push(dm); continue }
+      const ok = await readDm(dm) // a new DM on the very first run costs no request
+      if (discovery?.active.has(dm.id) && !ok && this.exhausted) hitsRead = false
+    }
+    // The search floor holds while a DM it pointed at is deferred by the budget, so the hit is found again next
+    // tick. A DM whose read fails outright does not hold it (it would pin the floor); its hist: cursor stays.
+    if (discovery && hitsRead) cursorUpdates.dmsearch = discovery.floor
+    await this.sweep('dmSweepAfter', quiet.filter((d) => d.type === 'mpim'), tickNo % MPIM_SWEEP_EVERY === 0, readDm)
+    await this.sweep('imSweepAfter', quiet.filter((d) => d.type === 'im'), tickNo % IM_SWEEP_EVERY === 0, readDm)
 
     if (this.exhausted) process.stderr.write(`ping-assistant: slack request budget exhausted, ${deferred} source(s) deferred to the next tick\n`)
     cursorUpdates.lastTick = nowTs
     return { collected: out.sort((a, b) => cmpTs(a.msg.ts, b.msg.ts)), cursorUpdates, removeCursors }
+  }
+
+  /**
+   * Quiet DMs: a round-robin sweep when due; one cut short by the budget (even before its first read) resumes
+   * next tick after the last DM it read, so no DM is starved by those listed before it.
+   */
+  private async sweep(key: 'dmSweepAfter' | 'imSweepAfter', quiet: { id: string; type: 'im' | 'mpim' }[], due: boolean, readDm: (dm: { id: string; type: 'im' | 'mpim' }) => Promise<boolean>): Promise<void> {
+    if (this.state[key] === undefined && due) this.state[key] = ''
+    const after = this.state[key]
+    if (after === undefined) return
+    for (const dm of quiet.sort((a, b) => (a.id < b.id ? -1 : 1)).filter((d) => d.id > after)) {
+      await readDm(dm)
+      if (this.exhausted) return
+      this.state[key] = dm.id
+    }
+    this.state[key] = undefined
+  }
+
+  /**
+   * DMs with a search hit newer than both the dmsearch floor and the DM's own hist: cursor. Thread replies are
+   * skipped: a history read would not surface them. The floor trails the newest hit like the mentions floor.
+   */
+  private async discoverDms(nowTs: string): Promise<Discovery> {
+    const floor = this.start('dmsearch')
+    if (!floor) return { active: new Set(), floor: nowTs }
+    const after = isoDate(Number(floor.split('.')[0]) * 1000 - 2 * DAY_MS)
+    const hits = (await this.slack.searchDms(after, floor)).filter((m) => m.channel && cmpTs(m.ts, floor) > 0)
+    const active = new Set<string>()
+    for (const h of hits) {
+      const channel = h.channel!
+      const hist = this.state.cursors[`hist:${channel}`]
+      if (h.thread_ts && h.thread_ts !== h.ts) continue
+      if (this.state.msgIndex[`${channel}:${h.ts}`] || (hist && cmpTs(h.ts, hist) <= 0)) continue
+      active.add(channel)
+    }
+    const newest = maxTs(undefined, ...hits.map((m) => m.ts))
+    return { active, floor: newest ? maxTs(floor, shiftTs(newest, -SEARCH_LAG_S))! : floor }
   }
 
   /** Drops watched threads whose follow-up window has passed, along with the cursor nobody else will track. */
