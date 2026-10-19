@@ -32,7 +32,7 @@ class FakeSlack {
   }
   failReplies = false
   // Surface the real Collector needs beyond what the Orchestrator uses.
-  async listDms() { return [] }
+  async listDms() { return [] as { id: string; type: 'im' | 'mpim'; user?: string }[] }
   resetBudget() {}
   async searchMentions() { return [] as RawMsg[] }
   async channelName(id: string) { return `name-${id}` }
@@ -962,4 +962,30 @@ test('socket mode: an enqueued DM becomes an item and, after the settle window, 
   sock.up = false // socket down: the next tick polls again
   await e.orch.tick()
   expect(collector.socketConnected).toBe(false)
+})
+
+test('socket mode: a reconcile poll replaying an own socket message does not close the counterpart\'s newer item', async () => {
+  const ts = (sec: number) => `${T0 / 1000 + sec}.000000`
+  const state = emptyState()
+  let collector!: Collector
+  const sock = { isConnected: () => true, epoch: () => 1 }
+  const e = await setup({ socketReconcileTicks: 3 }, state, (slack, cfg) => (collector = new Collector(slack as never, cfg, state, '/tmp/ping-assistant-test/files')), sock)
+  await e.orch.tick() // connect tick: polls, first-run cursors; D7 is not listed yet, so it has no hist: cursor
+  const own = { ts: ts(1), user: 'ME', text: 'привет' }
+  const theirs = { ts: ts(2), user: 'U2', text: 'Можешь глянуть PR?' }
+  collector.enqueue({ ...own, channel: 'D7' }, 'im')
+  e.advance(5_000)
+  await e.orch.tick()
+  collector.enqueue({ ...theirs, channel: 'D7' }, 'im')
+  e.advance(5_000)
+  await e.orch.tick()
+  expect(e.state.items['1']).toMatchObject({ status: 'settling', author: 'U2' })
+  // The reconcile poll: D7 is listed now and read from lastTick, so both messages come back.
+  e.slack.listDms = async () => [{ id: 'D7', type: 'im' as const }]
+  e.slack.hist.D7 = [own, theirs]
+  ;(e.slack as unknown as { searchDms: () => Promise<RawMsg[]> }).searchDms = async () => [{ ...own, channel: 'D7' }]
+  e.advance(5_000)
+  await e.orch.tick()
+  expect(e.state.items['1']!.status).toBe('settling')
+  expect(Object.keys(e.state.items)).toEqual(['1'])
 })

@@ -9,7 +9,7 @@ import { ingest, mature } from './items'
 import type { RawMsg, SlackClient } from './slack/client'
 import { applyCursors, cmpTs, type Collector } from './slack/collector'
 import type { SlackSocket } from './slack/socket'
-import type { Item, ItemStatus, SlackMsg, State, StateStore } from './state'
+import { OWN_MSG, type Item, type ItemStatus, type SlackMsg, type State, type StateStore } from './state'
 import type { Inbound, TelegramBot } from './telegram/bot'
 
 export type OrchestratorDeps = {
@@ -334,7 +334,8 @@ export class Orchestrator {
     const raws = (threadTs ? await slack.replies(item.channel, threadTs, floor) : await slack.history(item.channel, floor))
       .filter((r) => cmpTs(r.ts, floor) > 0 && r.user && !r.bot_id && r.subtype !== 'bot_message')
       // Messages already known (our own sends for sibling items, items already collected) are neither news nor Ilya's manual answer.
-      .filter((r) => !this.d.state.msgIndex[`${item.channel}:${r.ts}`])
+      // Ilya's own collected messages (OWN_MSG) still count: they may be his manual answer or a change.
+      .filter((r) => { const known = this.d.state.msgIndex[`${item.channel}:${r.ts}`]; return !known || known === OWN_MSG })
     const ownCloses = (threadTs !== undefined || item.source === 'im')
       && !(cfg.dryRun && cfg.selfDmTest === true && item.channel === this.d.state.selfDmChannel) // selfDmTest: own self-DM messages are foreign
     const answered = ownCloses && raws.some((r) => r.user === cfg.userId)

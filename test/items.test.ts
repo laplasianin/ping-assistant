@@ -9,7 +9,7 @@ import type { Config } from '../src/config'
 const cfg: Config = {
   userId: 'UILYA', watchChannels: [], telegramChatId: '1', pollSeconds: 60,
   settleSeconds: 90, maxSettleSeconds: 300, followUpDays: 7, contextMessages: 30, triageTimeoutSeconds: 600,
-  scentbirdRepoPath: '/x', dryRun: false, statePath: '/x/state.json',
+  scentbirdRepoPath: '/x', dryRun: false, statePath: '/x/state.json', drainSeconds: 5, socketReconcileTicks: 10,
 }
 const T0 = 1_760_800_000_000
 let n = 0
@@ -101,7 +101,7 @@ test('own message closes settling and awaiting items in the conversation as answ
   expect(ev.kind).toBe('answered_manually')
   expect((ev as { itemIds: string[] }).itemIds.sort()).toEqual(Object.keys(s.items).sort())
   expect(Object.values(s.items).every((i) => i.status === 'answered_manually')).toBe(true)
-  expect(s.msgIndex[`${own.channel}:${own.ts}`]).toBeUndefined()
+  expect(s.msgIndex[`${own.channel}:${own.ts}`]).toBe('own') // a replay is a duplicate, not a second close
 })
 
 test('own message with nothing to close is dropped as own', () => {
@@ -241,4 +241,31 @@ test('selfDmTest: an own message in another DM still closes items', () => {
   const ev = ingest(s, msg({ channel: 'D1', user: 'UILYA' }), 'im', T0 + 1000, selfCfg)
   expect(ev.kind).toBe('answered_manually')
   expect(Object.values(s.items)[0]!.status).toBe('answered_manually')
+})
+
+test('a replayed own message is a duplicate and cannot close a newer item', () => {
+  const s = emptyState()
+  const own = msg({ user: 'UILYA' })
+  expect(ingest(s, own, 'im', T0, cfg)).toEqual({ kind: 'dropped', reason: 'own' })
+  ingest(s, msg(), 'im', T0 + 1000, cfg)
+  expect(ingest(s, own, 'im', T0 + 2000, cfg)).toEqual({ kind: 'dropped', reason: 'duplicate' })
+  expect(Object.values(s.items).map((i) => i.status)).toEqual(['settling'])
+})
+
+test('a user-less message is indexed as seen too', () => {
+  const s = emptyState()
+  const m = msg({ user: '' })
+  expect(ingest(s, m, 'im', T0, cfg)).toEqual({ kind: 'dropped', reason: 'bot' })
+  expect(s.msgIndex[`${m.channel}:${m.ts}`]).toBe('own')
+})
+
+test('a late, older message is inserted in ts order; lastSeenTs stays the newest', () => {
+  const s = emptyState()
+  const a = msg(), b = msg(), c = msg()
+  ingest(s, a, 'im', T0, cfg)
+  ingest(s, c, 'im', T0 + 1000, cfg)
+  ingest(s, b, 'im', T0 + 2000, cfg) // recovered by a poll after a socket gap
+  const item = Object.values(s.items)[0]!
+  expect(item.messages.map((m) => m.ts)).toEqual([a.ts, b.ts, c.ts])
+  expect(item.lastSeenTs).toBe(c.ts)
 })

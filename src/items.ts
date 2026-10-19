@@ -1,5 +1,6 @@
 import type { Config } from './config'
-import type { Item, ItemSource, SlackMsg, State } from './state'
+import { cmpTs } from './slack/collector'
+import { OWN_MSG, type Item, type ItemSource, type SlackMsg, type State } from './state'
 
 export function conversationKey(m: SlackMsg): string {
   return `${m.channel}:${m.threadTs ?? ''}`
@@ -22,7 +23,9 @@ function itemKey(i: Item): string {
 
 function addMessage(state: State, item: Item, m: SlackMsg, now: number): void {
   item.messages.push(m)
-  item.lastSeenTs = m.ts
+  // A message recovered late (a poll after a socket gap) may be older than ones already in the item.
+  item.messages.sort((a, b) => cmpTs(a.ts, b.ts))
+  item.lastSeenTs = item.messages[item.messages.length - 1]!.ts
   item.lastMessageAt = now
   state.msgIndex[`${m.channel}:${m.ts}`] = item.id
 }
@@ -64,12 +67,14 @@ export function ingest(state: State, m: SlackMsg, source: ItemSource, now: numbe
 
   const selfTest = cfg.dryRun && cfg.selfDmTest === true && m.channel === state.selfDmChannel
   if (m.user === cfg.userId && !selfTest) {
+    // Indexed, so a replay (a reconcile poll re-reading what the socket delivered) cannot close newer items.
+    state.msgIndex[`${m.channel}:${m.ts}`] = OWN_MSG
     const closed = answeredBy(state, m, source)
     if (closed.length === 0) return { kind: 'dropped', reason: 'own' }
     for (const i of closed) i.status = 'answered_manually'
     return { kind: 'answered_manually', itemIds: closed.map((i) => i.id) }
   }
-  if (m.user === '') return { kind: 'dropped', reason: 'bot' }
+  if (m.user === '') { state.msgIndex[`${m.channel}:${m.ts}`] = OWN_MSG; return { kind: 'dropped', reason: 'bot' } }
 
   const mine = sameKey.filter((i) => i.author === m.user)
   const settling = latest(mine.filter((i) => i.status === 'settling'))

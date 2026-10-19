@@ -1,6 +1,9 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
+/** msgIndex value for a seen message that is in no item (Ilya's own, or user-less): dedup only. */
+export const OWN_MSG = 'own'
+
 export type SlackMsg = { channel: string; ts: string; threadTs?: string; user: string; userName?: string; text: string; files?: { id: string; name: string; path?: string }[]; permalink?: string }
 export type ItemStatus = 'settling'|'triage'|'ignored'|'awaiting'|'sent'|'skipped'|'answered_manually'
 export type ItemSource = 'im'|'mpim'|'mention'|'channel'|'followup'
@@ -19,7 +22,7 @@ export type Item = {
 export type State = {
   cursors: Record<string, string>;            // ключ: `hist:${channel}` | `thr:${channel}:${threadTs}` | 'search' | 'dmsearch' | 'lastTick'
   items: Record<string, Item>; nextSeq: number;
-  msgIndex: Record<string, string>;           // `${channel}:${ts}` → item.id (дедуп)
+  msgIndex: Record<string, string>;           // `${channel}:${ts}` → item.id, или OWN_MSG для своих/без автора (дедуп)
   watchedThreads: Record<string, { until: number }>;  // `${channel}:${threadTs}`
   users: Record<string, string>;              // userId → display name (кэш)
   tickCount?: number;                         // collector ticks so far (quiet MPIMs swept every 10th, quiet IMs every 30th)
