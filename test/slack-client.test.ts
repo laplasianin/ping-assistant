@@ -107,3 +107,16 @@ test('searchMentions parses thread_ts from the match permalink', async () => {
   const out = await new SlackClient('t', fetchImpl).searchMentions('U1', '2026-10-01')
   expect(out.map((m) => m.thread_ts)).toEqual(['1.5', undefined])
 })
+
+test('recent fetches one page of history before a ts, oldest first', async () => {
+  const { fetchImpl, calls } = fake([
+    json({ ok: true, messages: [{ ts: '9', text: 'c' }, { ts: '8', text: 'b' }], response_metadata: { next_cursor: 'more' } }),
+  ])
+  const msgs = await new SlackClient('t', fetchImpl).recent('D1', '10.000000', 2)
+  expect(msgs.map((m) => m.ts)).toEqual(['8', '9'])
+  expect(calls).toHaveLength(1)
+  expect(calls[0]!.url.pathname).toBe('/api/conversations.history')
+  expect(calls[0]!.url.searchParams.get('latest')).toBe('10.000000')
+  expect(calls[0]!.url.searchParams.get('inclusive')).toBe('false')
+  expect(calls[0]!.url.searchParams.get('limit')).toBe('2')
+})

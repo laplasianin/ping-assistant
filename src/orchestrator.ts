@@ -135,24 +135,31 @@ export class Orchestrator {
     const { tg, state } = this.d
     const item = this.openItem(id)
     const original = item.telegram.messageId
-    item.analysis = analysis
-    item.status = 'awaiting'
+    // Send first and commit after: «N 2» / «N да» must never act on text Ilya has not seen.
+    const show = async (text: string, keyboard: Keyboard): Promise<number> => {
+      try {
+        return await tg.send(text, keyboard, original)
+      } catch (err) {
+        throw new Error(`#${id}: Telegram send failed (${errName(err)}), item unchanged`)
+      }
+    }
     if (mode === 'final') {
       // Show exactly the text that will go to Slack; confirm sends it verbatim.
-      item.pendingText = slackify(variants[0] ?? '')
-      const p = renderProposal(item, item.pendingText)
-      const pid = await tg.send(p.text, p.keyboard, original)
+      const pendingText = slackify(variants[0] ?? '')
+      const p = renderProposal(item, pendingText)
+      const pid = await show(p.text, p.keyboard)
+      Object.assign(item, { analysis, status: 'awaiting', pendingText, forceSend: undefined })
       item.telegram.proposalMessageId = pid
+      item.telegram.chosen = undefined
       tg.registerMessage(pid, item.id)
       await this.annotate(item, '✏️ правка ниже')
       this.save()
       return `#${id}: final text shown to Ilya, waiting for confirmation`
     }
-    await this.annotate(item, '✏️ новые варианты ниже')
-    item.variants = variants
-    item.pendingText = undefined
-    const r = renderItem(item, state.users, state.channels, this.now())
-    const mid = await tg.send(r.text, r.keyboard, original)
+    const r = renderItem({ ...item, analysis, variants }, state.users, state.channels, this.now())
+    const mid = await show(r.text, r.keyboard)
+    await this.annotate(item, '✏️ правка ниже') // old message, still described by item.telegram
+    Object.assign(item, { analysis, variants, status: 'awaiting', pendingText: undefined, forceSend: undefined })
     item.telegram = { messageId: mid, text: withoutHint(r.text) }
     tg.registerMessage(mid, item.id)
     this.save()
@@ -186,16 +193,17 @@ export class Orchestrator {
       case 'confirm':
       case 'force':
         if (!item.pendingText) { await tg.send(`#${item.id}: нет текста, ожидающего отправки`); return }
-        return this.sendToSlack(item, item.pendingText, c.kind === 'force')
+        // «N да» after a thread-changed warning is the confirmation the warning asked for.
+        return this.sendToSlack(item, item.pendingText, c.kind === 'force' || item.forceSend === true, item.telegram.chosen ?? 'custom')
       case 'skip':
         item.status = 'skipped'
-        item.pendingText = undefined
+        this.clearHeld(item)
         return this.closeOriginal(item)
       case 'cancel': {
         const isProposal = messageId === item.telegram.proposalMessageId
         const text = isProposal && item.pendingText ? renderProposal(item, item.pendingText).text : `#${item.id}`
         await this.edit(messageId, `${text}\n\n❌ отменено`)
-        item.pendingText = undefined
+        this.clearHeld(item)
         if (item.telegram.messageId !== undefined && item.variants) {
           const r = renderItem(item, state.users, state.channels, this.now())
           await this.edit(item.telegram.messageId, r.text, r.keyboard)
@@ -207,12 +215,17 @@ export class Orchestrator {
   private async sendToSlack(item: Item, text: string, force: boolean, chosen?: number | 'custom'): Promise<void> {
     const { tg, slack, cfg, state } = this.d
     if (!force) {
-      const fresh = await this.newForeignMessages(item)
+      let fresh: SlackMsg[]
+      try {
+        fresh = await this.newForeignMessages(item)
+      } catch (err) {
+        // Fail closed: an unverified conversation is treated like a changed one.
+        log(`thread check failed: ${errName(err)}`)
+        const warning = `⚠️ не смог проверить тред #${item.id} (${errName(err)}), нажми «Всё равно отправить» или повтори`
+        return this.holdForForce(item, text, chosen, warning)
+      }
       if (fresh.length) {
-        item.pendingText = text
-        const r = renderThreadChanged(item, fresh, state.users, state.channels)
-        tg.registerMessage(await tg.send(r.text, r.keyboard, item.telegram.messageId), item.id)
-        return
+        return this.holdForForce(item, text, chosen, renderThreadChanged(item, fresh, state.users, state.channels).text)
       }
     }
     if (cfg.dryRun) {
@@ -231,7 +244,7 @@ export class Orchestrator {
       if (threadTs) this.watch(item, threadTs, item.sentTs)
     }
     item.status = 'sent'
-    item.pendingText = undefined
+    this.clearHeld(item)
     await this.annotate(item, outcome(item, chosen))
     const proposal = item.telegram.proposalMessageId
     if (proposal !== undefined) await this.edit(proposal, `${renderProposal(item, text).text}\n\n${outcome(item)}`)
@@ -241,6 +254,22 @@ export class Orchestrator {
     }
   }
 
+  /** Keeps the text until Ilya forces («Всё равно отправить» / «N да») or cancels. */
+  private async holdForForce(item: Item, text: string, chosen: number | 'custom' | undefined, warning: string): Promise<void> {
+    const { tg } = this.d
+    item.pendingText = text
+    item.forceSend = true
+    item.telegram.chosen = typeof chosen === 'number' ? chosen : undefined
+    const { keyboard } = renderThreadChanged(item, [])
+    tg.registerMessage(await tg.send(warning, keyboard, item.telegram.messageId), item.id)
+  }
+
+  private clearHeld(item: Item): void {
+    item.pendingText = undefined
+    item.forceSend = undefined
+    item.telegram.chosen = undefined
+  }
+
   private watch(item: Item, threadTs: string, sentTs: string): void {
     const { state, cfg } = this.d
     item.threadTs = threadTs
@@ -248,21 +277,16 @@ export class Orchestrator {
     state.cursors[`thr:${item.channel}:${threadTs}`] = sentTs // collector resumes after our reply
   }
 
-  /** Messages from others in the item's conversation newer than anything the session saw. */
+  /** Messages from others in the item's conversation newer than anything the session saw. Throws on Slack errors. */
   private async newForeignMessages(item: Item): Promise<SlackMsg[]> {
     const { slack, cfg } = this.d
     // lastSeenTs may regress for out-of-order messages: use the max ts actually in the item.
     const floor = item.messages.reduce((m, x) => (cmpTs(x.ts, m) > 0 ? x.ts : m), item.lastSeenTs)
     const threadTs = item.threadTs ?? (isDm(item) ? undefined : item.messages[0]?.ts)
-    try {
-      const raws = threadTs ? await slack.replies(item.channel, threadTs, floor) : await slack.history(item.channel, floor)
-      return raws
-        .filter((r) => cmpTs(r.ts, floor) > 0 && r.user && r.user !== cfg.userId && !r.bot_id && r.subtype !== 'bot_message')
-        .map((r) => this.toMsg(r, item.channel))
-    } catch (err) {
-      log(`thread check failed: ${errName(err)}`)
-      return []
-    }
+    const raws = threadTs ? await slack.replies(item.channel, threadTs, floor) : await slack.history(item.channel, floor)
+    return raws
+      .filter((r) => cmpTs(r.ts, floor) > 0 && r.user && r.user !== cfg.userId && !r.bot_id && r.subtype !== 'bot_message')
+      .map((r) => this.toMsg(r, item.channel))
   }
 
   private async onAppended(item: Item, msg: SlackMsg): Promise<void> {
@@ -283,12 +307,15 @@ export class Orchestrator {
     }
   }
 
-  /** v1: thread history up to the item's first message; top-level conversations get no context. */
+  /** Up to contextMessages before the item's first message: the thread, or one page of the conversation for top-level items. */
   private async context(item: Item): Promise<SlackMsg[]> {
     const first = item.messages[0]?.ts
-    if (!item.threadTs || !first) return []
+    if (!first) return []
+    const { slack, cfg } = this.d
     try {
-      const raws = await this.d.slack.replies(item.channel, item.threadTs)
+      const raws = item.threadTs
+        ? await slack.replies(item.channel, item.threadTs)
+        : await slack.recent(item.channel, first, cfg.contextMessages)
       return raws.filter((r) => cmpTs(r.ts, first) < 0).slice(-this.d.cfg.contextMessages).map((r) => this.toMsg(r, item.channel))
     } catch (err) {
       log(`context failed: ${errName(err)}`)

@@ -19,8 +19,17 @@ class FakeSlack {
   hist: Record<string, RawMsg[]> = {}
   posted: { channel: string; text: string; threadTs?: string }[] = []
   private after = (msgs: RawMsg[], oldest?: string) => msgs.filter((m) => !oldest || Number(m.ts) > Number(oldest))
-  async replies(channel: string, threadTs: string, oldest?: string) { return this.after(this.repl[`${channel}:${threadTs}`] ?? [], oldest) }
+  async replies(channel: string, threadTs: string, oldest?: string) {
+    if (this.failReplies) throw new TypeError('network down')
+    return this.after(this.repl[`${channel}:${threadTs}`] ?? [], oldest)
+  }
   async history(channel: string, oldest?: string) { return this.after(this.hist[channel] ?? [], oldest) }
+  recentCalls: { channel: string; latest: string; limit: number }[] = []
+  async recent(channel: string, latest: string, limit: number) {
+    this.recentCalls.push({ channel, latest, limit })
+    return (this.hist[channel] ?? []).filter((m) => Number(m.ts) < Number(latest)).slice(-limit)
+  }
+  failReplies = false
   async permalink(channel: string, ts: string) { return `https://slack/${channel}/${ts}` }
   async postMessage(channel: string, text: string, threadTs?: string) {
     this.posted.push({ channel, text, ...(threadTs ? { threadTs } : {}) })
@@ -31,9 +40,11 @@ class FakeSlack {
 type Sent = { text: string; opts: Record<string, any>; id: number }
 class FakeApi implements TelegramApi {
   sent: Sent[] = []
+  failNextSend = false
   edits: { id: number; text: string; opts: Record<string, any> }[] = []
   nextId = 100
   async sendMessage(_chat: string, text: string, opts: Record<string, any> = {}) {
+    if (this.failNextSend) { this.failNextSend = false; throw new Error('telegram down') }
     const id = this.nextId++
     this.sent.push({ text, opts, id })
     return { message_id: id }
@@ -391,4 +402,115 @@ test('channel never receives a slack-send tool', async () => {
   const { tools } = await e.client.listTools()
   expect(tools.length).toBeGreaterThan(0)
   expect(tools.filter((t) => /send|post|slack/i.test(t.name))).toEqual([])
+})
+
+test('«N да» after a thread-changed warning sends the held text without re-checking', async () => {
+  const e = await setup()
+  await matureThreadItem(e)
+  const sent = await propose(e, ['a', 'b'])
+  e.slack.repl['C1:100.000000'] = [{ ts: '108.000000', user: 'U5', text: 'Уже починил' }]
+  await e.callback('pa:choose:1:2', sent.id)
+  expect(e.state.items['1']!.forceSend).toBe(true)
+  await e.text('1 да')
+
+  expect(e.slack.posted).toEqual([{ channel: 'C1', text: 'b', threadTs: '100.000000' }])
+  const item = e.state.items['1']!
+  expect(item.status).toBe('sent')
+  expect(item.forceSend).toBeUndefined()
+  expect(e.api.lastEdit(sent.id)!.text).toContain('✅ отправлен вариант 2')
+})
+
+test('cancel on a thread-changed warning clears the held text and force flag', async () => {
+  const e = await setup()
+  await matureThreadItem(e)
+  const sent = await propose(e, ['a', 'b'])
+  e.slack.repl['C1:100.000000'] = [{ ts: '108.000000', user: 'U5', text: 'Уже починил' }]
+  await e.callback('pa:choose:1:1', sent.id)
+  await e.callback('pa:cancel:1', e.api.last().id)
+
+  const item = e.state.items['1']!
+  expect(item.pendingText).toBeUndefined()
+  expect(item.forceSend).toBeUndefined()
+  expect(item.status).toBe('awaiting')
+  expect(e.slack.posted).toEqual([])
+})
+
+test('a failed thread check holds the text and asks to force instead of sending', async () => {
+  const e = await setup()
+  await matureThreadItem(e)
+  const sent = await propose(e, ['a', 'b'])
+  e.slack.failReplies = true
+  await e.callback('pa:choose:1:1', sent.id)
+
+  expect(e.slack.posted).toEqual([])
+  const warn = e.api.last()
+  expect(warn.text).toBe('⚠️ не смог проверить тред #1 (TypeError), нажми «Всё равно отправить» или повтори')
+  expect(buttons(warn)).toEqual(['Всё равно отправить', 'Отмена'])
+  expect(warn.opts.reply_parameters).toEqual({ message_id: sent.id })
+  expect(e.state.items['1']!.pendingText).toBe('a')
+  expect(e.state.items['1']!.forceSend).toBe(true)
+
+  await e.callback('pa:force:1', warn.id)
+  expect(e.slack.posted).toEqual([{ channel: 'C1', text: 'a', threadTs: '100.000000' }])
+  expect(e.api.lastEdit(sent.id)!.text).toContain('✅ отправлен вариант 1')
+})
+
+test('propose leaves the item untouched when the telegram send fails', async () => {
+  const e = await setup()
+  await matureThreadItem(e)
+  e.api.failNextSend = true
+  const first = await e.client.callTool({ name: 'propose', arguments: { item_id: '1', analysis: 'x', variants: ['a'], mode: 'variants' } })
+  expect(first.isError).toBe(true)
+  expect((first.content as { text: string }[])[0]!.text).toContain('Telegram')
+  let item = e.state.items['1']!
+  expect(item.status).toBe('triage')
+  expect(item.variants).toBeUndefined()
+  expect(item.telegram).toEqual({})
+
+  const sent = await propose(e, ['a', 'b'])
+  e.api.failNextSend = true
+  expect((await e.client.callTool({ name: 'propose', arguments: { item_id: '1', analysis: 'y', variants: ['c'], mode: 'variants' } })).isError).toBe(true)
+  e.api.failNextSend = true
+  expect((await e.client.callTool({ name: 'propose', arguments: { item_id: '1', analysis: 'y', variants: ['c'], mode: 'final' } })).isError).toBe(true)
+
+  item = e.state.items['1']!
+  expect(item.variants).toEqual(['a', 'b'])
+  expect(item.analysis).toBe('Тип: технический')
+  expect(item.pendingText).toBeUndefined()
+  expect(item.telegram.messageId).toBe(sent.id)
+  expect(item.telegram.proposalMessageId).toBeUndefined()
+  expect(e.api.lastEdit(sent.id)).toBeUndefined() // old buttons still live
+})
+
+test('re-propose marks the previous message «✏️ правка ниже»', async () => {
+  const e = await setup()
+  await matureThreadItem(e)
+  const first = await propose(e, ['a', 'b'])
+  const second = await propose(e, ['c', 'd'])
+  expect(e.api.lastEdit(first.id)!.text).toEndWith('✏️ правка ниже')
+  expect(second.opts.reply_parameters).toEqual({ message_id: first.id })
+  expect(e.tg.resolveItemId(second.id)).toBe('1')
+})
+
+test('top-level DM item gets recent history before it as context', async () => {
+  const e = await setup({ contextMessages: 2 })
+  e.state.users.U2 = 'User U2'
+  e.slack.hist.D1 = [
+    { ts: '90.000000', user: 'U2', text: 'too old' },
+    { ts: '95.000000', user: 'ME', text: 'мой вопрос' },
+    { ts: '99.000000', user: 'U2', text: 'контекст' },
+    { ts: '105.000000', user: 'U2', text: 'сам вопрос' },
+  ]
+  e.collector.queue.push({ msg: { channel: 'D1', ts: '105.000000', user: 'U2', text: 'сам вопрос' }, source: 'im' })
+  await e.orch.tick()
+  e.advance(91_000)
+  await e.orch.tick()
+  await e.flush()
+
+  expect(e.slack.recentCalls).toEqual([{ channel: 'D1', latest: '105.000000', limit: 2 }])
+  const body = JSON.parse(e.notes[0]!.content)
+  expect(body.context).toEqual([
+    { ts: '95.000000', user: 'ME', text: 'мой вопрос' },
+    { ts: '99.000000', user: 'U2', userName: 'User U2', text: 'контекст' },
+  ])
 })

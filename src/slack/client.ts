@@ -55,6 +55,12 @@ export class SlackClient {
     return msgs.reverse() // Slack returns newest-first
   }
 
+  /** One page (at most `limit`) of top-level messages before `latestTs`, oldest first. */
+  async recent(channel: string, latestTs: string, limit: number): Promise<RawMsg[]> {
+    const res = await this.get('conversations.history', { channel, latest: latestTs, inclusive: false, limit })
+    return ((res.messages as RawMsg[] | undefined) ?? []).reverse()
+  }
+
   async replies(channel: string, threadTs: string, oldestTs?: string): Promise<RawMsg[]> {
     const params = oldestTs ? { channel, ts: threadTs, oldest: oldestTs, inclusive: false } : { channel, ts: threadTs }
     const msgs = (await this.getCursorPages('conversations.replies', params, 'messages')) as RawMsg[]
