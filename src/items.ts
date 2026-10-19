@@ -38,6 +38,20 @@ function newItem(state: State, m: SlackMsg, source: ItemSource, now: number, id:
   return item
 }
 
+/** A top-level item's conversation also includes the thread under its first message. */
+function inThread(i: Item, threadTs: string): boolean {
+  return i.threadTs === threadTs || (!i.threadTs && i.messages[0]?.ts === threadTs)
+}
+
+/** Open items Ilya's own message answers: in an IM every open item; elsewhere only the thread he replied in. */
+function answeredBy(state: State, m: SlackMsg, source: ItemSource): Item[] {
+  const open = Object.values(state.items)
+    .filter((i) => i.channel === m.channel && (i.status === 'settling' || i.status === 'triage' || i.status === 'awaiting'))
+  if (m.threadTs) return open.filter((i) => inThread(i, m.threadTs!))
+  // A top-level message in a channel or MPIM may address anyone: it closes nothing.
+  return source === 'im' ? open : []
+}
+
 function latest(items: Item[]): Item | undefined {
   return items.reduce<Item | undefined>((best, i) => (!best || i.createdAt >= best.createdAt ? i : best), undefined)
 }
@@ -49,7 +63,7 @@ export function ingest(state: State, m: SlackMsg, source: ItemSource, now: numbe
   const sameKey = Object.values(state.items).filter((i) => itemKey(i) === key)
 
   if (m.user === cfg.userId) {
-    const closed = sameKey.filter((i) => i.status === 'settling' || i.status === 'awaiting')
+    const closed = answeredBy(state, m, source)
     if (closed.length === 0) return { kind: 'dropped', reason: 'own' }
     for (const i of closed) i.status = 'answered_manually'
     return { kind: 'answered_manually', itemIds: closed.map((i) => i.id) }
@@ -62,10 +76,11 @@ export function ingest(state: State, m: SlackMsg, source: ItemSource, now: numbe
     addMessage(state, settling, m, now)
     return { kind: 'buffered', itemId: settling.id }
   }
-  const awaiting = latest(mine.filter((i) => i.status === 'awaiting'))
-  if (awaiting) {
-    addMessage(state, awaiting, m, now)
-    return { kind: 'appended', itemId: awaiting.id }
+  // An addendum while the session triages it (or Ilya decides) belongs to the same item.
+  const open = latest(mine.filter((i) => i.status === 'triage' || i.status === 'awaiting'))
+  if (open) {
+    addMessage(state, open, m, now)
+    return { kind: 'appended', itemId: open.id }
   }
 
   if (m.threadTs && state.watchedThreads[key]) {

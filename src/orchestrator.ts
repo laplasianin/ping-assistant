@@ -3,7 +3,8 @@
 import type { Channel, ChannelHandlers } from './channel'
 import { callbackData, type Command } from './commands'
 import type { Config } from './config'
-import { chunk, outcome, renderItem, renderProposal, renderThreadChanged, renderUpdate, slackify, type Keyboard } from './format'
+import { outcome, renderItem, renderProposal, renderThreadChanged, renderUpdate, slackify, type Keyboard } from './format'
+import { ItemMessages, itemJson, lastPart, msgJson, withoutHint } from './item-messages'
 import { ingest, mature } from './items'
 import type { RawMsg, SlackClient } from './slack/client'
 import { applyCursors, cmpTs, type Collector } from './slack/collector'
@@ -21,33 +22,15 @@ const DAY_MS = 86_400_000
 const log = (kind: string): void => { process.stderr.write(`ping-assistant: ${kind}\n`) }
 const errName = (err: unknown): string => (err instanceof Error ? err.name : 'unknown')
 const isDm = (item: Item): boolean => item.source === 'im' || item.source === 'mpim'
-const TG_LIMIT = 4096
-/** The text of the last Telegram message a long text is split into: the one carrying the buttons. */
-const lastPart = (text: string): string => chunk(text, TG_LIMIT).pop() ?? ''
-/** The item's message text without the trailing «Ответь: …» hint line. */
-const withoutHint = (text: string): string => {
-  const cut = text.lastIndexOf('\n\n')
-  return cut < 0 ? '' : text.slice(0, cut)
-}
-
-const msgJson = (m: SlackMsg) => ({ ts: m.ts, user: m.user, userName: m.userName, text: m.text, ...(m.files ? { files: m.files } : {}) })
-
-function itemJson(item: Item) {
-  return {
-    id: item.id, source: item.source, channel: item.channel, channelName: item.channelName, threadTs: item.threadTs,
-    author: item.author, authorName: item.authorName,
-    messages: item.messages.map(msgJson), context: item.context.map(msgJson),
-    permalink: item.messages[0]?.permalink, files: item.messages.flatMap((m) => m.files ?? []),
-  }
-}
-
 export class Orchestrator {
   private readonly now: () => number
   private timer: ReturnType<typeof setInterval> | undefined
   private ticking: Promise<void> | undefined
+  private readonly msgs: ItemMessages
 
   constructor(private readonly d: OrchestratorDeps) {
     this.now = d.now ?? Date.now
+    this.msgs = new ItemMessages(d.tg)
   }
 
   start(): void {
@@ -94,7 +77,7 @@ export class Orchestrator {
         await this.safely(ev.kind, async () => {
           if (ev.kind === 'appended') await this.onAppended(state.items[ev.itemId]!, msg)
           if (ev.kind === 'answered_manually') {
-            for (const id of ev.itemIds) await this.closeOriginal(state.items[id]!)
+            for (const id of ev.itemIds) await this.msgs.closeOriginal(state.items[id]!)
           }
         })
       }
@@ -130,7 +113,7 @@ export class Orchestrator {
         const item = this.openItem(id)
         item.status = 'skipped'
         item.pendingText = undefined
-        await this.closeOriginal(item)
+        await this.msgs.closeOriginal(item)
         return done(`#${id} closed`)
       },
       listItems: async (status) => {
@@ -171,19 +154,19 @@ export class Orchestrator {
       const pendingText = slackify(variants[0] ?? '')
       const p = renderProposal(item, pendingText)
       const pid = await show(p.text, p.keyboard)
-      await this.retireHeldButtons(item) // an older proposal or warning must not confirm this text
+      await this.msgs.retire(item) // an older proposal or warning must not confirm this text
       Object.assign(item, { analysis, status: 'awaiting', pendingText, forceSend: undefined })
       item.telegram.proposalMessageId = pid
       item.telegram.chosen = undefined
       tg.registerMessage(pid, item.id)
-      await this.annotate(item, '✏️ правка ниже')
+      await this.msgs.annotate(item, '✏️ правка ниже')
       this.save()
       return `#${id}: final text shown to Ilya, waiting for confirmation`
     }
     const r = renderItem({ ...item, analysis, variants }, state.users, state.channels, this.now())
     const mid = await show(r.text, r.keyboard)
-    await this.annotate(item, '✏️ правка ниже') // old message, still described by item.telegram
-    await this.retireHeldButtons(item)
+    await this.msgs.annotate(item, '✏️ правка ниже') // old message, still described by item.telegram
+    await this.msgs.retire(item)
     Object.assign(item, { analysis, variants, status: 'awaiting', pendingText: undefined, forceSend: undefined })
     // Long items arrive in several messages; only the last one (with the buttons) is ever edited.
     item.telegram = { messageId: mid, text: withoutHint(lastPart(r.text)) || `#${item.id}` }
@@ -239,18 +222,18 @@ export class Orchestrator {
       case 'skip':
         item.status = 'skipped'
         this.clearHeld(item)
-        await this.retireHeldButtons(item)
-        return this.closeOriginal(item)
+        await this.msgs.retire(item)
+        return this.msgs.closeOriginal(item)
       case 'cancel': {
         // A text «cancel» does not exist: messageId is the proposal or warning that carried the button.
         const isProposal = messageId === item.telegram.proposalMessageId
         const text = isProposal && item.pendingText ? lastPart(renderProposal(item, item.pendingText).text) : `#${item.id}`
-        await this.edit(messageId, `${text}\n\n❌ отменено`)
+        await this.msgs.edit(messageId, `${text}\n\n❌ отменено`)
         this.clearHeld(item)
-        await this.retireHeldButtons(item, messageId)
+        await this.msgs.retire(item, messageId)
         if (item.telegram.messageId !== undefined && item.variants) {
           const r = renderItem(item, state.users, state.channels, this.now())
-          await this.edit(item.telegram.messageId, lastPart(r.text), r.keyboard)
+          await this.msgs.edit(item.telegram.messageId, lastPart(r.text), r.keyboard)
         }
       }
     }
@@ -260,14 +243,16 @@ export class Orchestrator {
     const { tg, slack, cfg, state } = this.d
     if (!force) {
       let fresh: SlackMsg[]
+      let answered: boolean
       try {
-        fresh = await this.newForeignMessages(item)
+        ({ fresh, answered } = await this.newMessages(item))
       } catch (err) {
         // Fail closed: an unverified conversation is treated like a changed one.
         log(`thread check failed: ${errName(err)}`)
         const warning = `⚠️ не смог проверить тред #${item.id} (${errName(err)}), нажми «Всё равно отправить» или повтори`
         return this.holdForForce(item, text, chosen, warning)
       }
+      if (answered) return this.answeredMeanwhile(item)
       if (fresh.length) {
         return this.holdForForce(item, text, chosen, renderThreadChanged(item, fresh, state.users, state.channels).text)
       }
@@ -289,11 +274,11 @@ export class Orchestrator {
     }
     item.status = 'sent'
     this.clearHeld(item)
-    await this.annotate(item, outcome(item, chosen))
+    await this.msgs.annotate(item, outcome(item, chosen))
     const proposal = item.telegram.proposalMessageId
-    if (proposal !== undefined) await this.edit(proposal, `${lastPart(renderProposal(item, text).text)}\n\n${outcome(item)}`)
+    if (proposal !== undefined) await this.msgs.edit(proposal, `${lastPart(renderProposal(item, text).text)}\n\n${outcome(item)}`)
     const warning = item.telegram.warningMessageId
-    if (warning !== undefined) await this.dropKeyboard(warning)
+    if (warning !== undefined) await this.msgs.dropKeyboard(warning)
     if (!cfg.dryRun) {
       const link = await slack.permalink(item.channel, item.sentTs).catch(() => undefined)
       await tg.send(`✅ отправлено${link ? `: ${link}` : ''}`, undefined, item.telegram.messageId)
@@ -308,7 +293,7 @@ export class Orchestrator {
     // The new warning supersedes any older proposal or warning: their buttons must not send this text.
     // The proposal id is kept so its outcome can still be written there; staleButton refuses it while a warning is live.
     const { proposalMessageId, warningMessageId } = item.telegram
-    for (const id of [proposalMessageId, warningMessageId]) if (id !== undefined) await this.dropKeyboard(id)
+    for (const id of [proposalMessageId, warningMessageId]) if (id !== undefined) await this.msgs.dropKeyboard(id)
     item.pendingText = text
     item.forceSend = true
     item.telegram.chosen = typeof chosen === 'number' ? chosen : undefined
@@ -322,25 +307,6 @@ export class Orchestrator {
     item.telegram.chosen = undefined
   }
 
-  /** Strips the buttons of the item's proposal and warning messages (except `keep`) and forgets them. */
-  private async retireHeldButtons(item: Item, keep?: number): Promise<void> {
-    for (const key of ['proposalMessageId', 'warningMessageId'] as const) {
-      const id = item.telegram[key]
-      if (id === undefined) continue
-      if (id !== keep) await this.dropKeyboard(id)
-      item.telegram[key] = undefined
-    }
-  }
-
-  private async dropKeyboard(messageId: number): Promise<void> {
-    try {
-      await this.d.tg.dropKeyboard(messageId)
-    } catch (err) {
-      if (err instanceof Error && err.message.includes('message is not modified')) return
-      log(`telegram keyboard removal failed: ${errName(err)}`)
-    }
-  }
-
   private watch(item: Item, threadTs: string, sentTs: string): void {
     const { state, cfg } = this.d
     item.threadTs = threadTs
@@ -348,22 +314,40 @@ export class Orchestrator {
     state.cursors[`thr:${item.channel}:${threadTs}`] = sentTs // collector resumes after our reply
   }
 
-  /** Messages from others in the item's conversation newer than anything the session saw. Throws on Slack errors. */
-  private async newForeignMessages(item: Item): Promise<SlackMsg[]> {
+  /**
+   * Messages in the item's conversation newer than anything the session saw. Throws on Slack errors.
+   * answered: Ilya already replied there himself (in the thread, or anywhere in a 1:1 IM); in an MPIM
+   * his top-level message may address someone else, so it only counts as a change.
+   */
+  private async newMessages(item: Item): Promise<{ fresh: SlackMsg[]; answered: boolean }> {
     const { slack, cfg } = this.d
     // lastSeenTs may regress for out-of-order messages: use the max ts actually in the item.
     const floor = item.messages.reduce((m, x) => (cmpTs(x.ts, m) > 0 ? x.ts : m), item.lastSeenTs)
     const threadTs = item.threadTs ?? (isDm(item) ? undefined : item.messages[0]?.ts)
-    const raws = threadTs ? await slack.replies(item.channel, threadTs, floor) : await slack.history(item.channel, floor)
-    return raws
-      .filter((r) => cmpTs(r.ts, floor) > 0 && r.user && r.user !== cfg.userId && !r.bot_id && r.subtype !== 'bot_message')
-      .map((r) => this.toMsg(r, item.channel))
+    const raws = (threadTs ? await slack.replies(item.channel, threadTs, floor) : await slack.history(item.channel, floor))
+      .filter((r) => cmpTs(r.ts, floor) > 0 && r.user && !r.bot_id && r.subtype !== 'bot_message')
+    const ownCloses = threadTs !== undefined || item.source === 'im'
+    const answered = ownCloses && raws.some((r) => r.user === cfg.userId)
+    const fresh = raws.filter((r) => !ownCloses || r.user !== cfg.userId).map((r) => this.toMsg(r, item.channel))
+    return { fresh, answered }
+  }
+
+  /** The pre-send check found Ilya's own reply: close the item instead of sending a second answer. */
+  private async answeredMeanwhile(item: Item): Promise<void> {
+    item.status = 'answered_manually'
+    this.clearHeld(item)
+    await this.msgs.retire(item)
+    await this.msgs.closeOriginal(item)
+    await this.d.tg.send(`🙈 #${item.id} — ты уже ответил в треде`, undefined, item.telegram.messageId)
   }
 
   private async onAppended(item: Item, msg: SlackMsg): Promise<void> {
     const { tg, state } = this.d
-    const id = await tg.send(renderUpdate(item, [msg], state.users, state.channels), undefined, item.telegram.messageId)
-    tg.registerMessage(id, item.id)
+    // During triage Ilya has nothing to act on yet: only the session hears about the addendum.
+    if (item.status === 'awaiting') {
+      const id = await tg.send(renderUpdate(item, [msg], state.users, state.channels), undefined, item.telegram.messageId)
+      tg.registerMessage(id, item.id)
+    }
     await this.d.channel.notify(JSON.stringify({ id: item.id, newMessages: [msgJson(msg)] }), { kind: 'update', item_id: item.id })
   }
 
@@ -409,28 +393,6 @@ export class Orchestrator {
     } catch (err) {
       log(`context failed: ${errName(err)}`)
       return []
-    }
-  }
-
-  /** Edits the item's Telegram message to its final outcome (buttons removed). */
-  private closeOriginal(item: Item): Promise<void> {
-    return this.annotate(item, outcome(item))
-  }
-
-  private async annotate(item: Item, line: string): Promise<void> {
-    const { messageId, text } = item.telegram
-    if (messageId === undefined || !text) return
-    await this.edit(messageId, `${text}\n\n${line}`)
-  }
-
-  private async edit(messageId: number, text: string, keyboard?: Keyboard): Promise<void> {
-    // Telegram rejects a longer edit outright; still make sure the old buttons go away.
-    if (text.length > TG_LIMIT) { if (!keyboard) await this.dropKeyboard(messageId); return }
-    try {
-      await this.d.tg.edit(messageId, text, keyboard)
-    } catch (err) {
-      if (err instanceof Error && err.message.includes('message is not modified')) return
-      log(`telegram edit failed: ${errName(err)}`)
     }
   }
 

@@ -244,7 +244,6 @@ test('choose with new foreign messages after lastSeenTs asks force instead of se
   const sent = await propose(e, ['a', 'b'])
   e.slack.repl['C1:100.000000'] = [
     { ts: '105.000000', user: 'U2', text: 'Почему падает сборка?' },
-    { ts: '106.000000', user: 'ME', text: 'my own' },
     { ts: '107.000000', user: 'U9', bot_id: 'B1', text: 'bot noise' },
     { ts: '108.000000', user: 'U5', text: 'Уже починил' },
   ]
@@ -255,7 +254,6 @@ test('choose with new foreign messages after lastSeenTs asks force instead of se
   expect(warn.text).toContain('в треде появилось новое')
   expect(warn.text).toContain('Уже починил')
   expect(warn.text).not.toContain('bot noise')
-  expect(warn.text).not.toContain('my own')
   expect(warn.opts.reply_parameters).toEqual({ message_id: sent.id })
   expect(buttons(warn)).toEqual(['Всё равно отправить', 'Отмена'])
   expect(e.tg.resolveItemId(warn.id)).toBe('1')
@@ -775,4 +773,62 @@ test('propose after a triage reminder replies to it and retires it', async () =>
   expect(e.api.lastEdit(alert.id)!.opts.reply_markup).toEqual({ inline_keyboard: [] })
   await e.callback('pa:choose:1:1', sent.id)
   expect(e.slack.posted).toEqual([{ channel: 'C1', text: 'a', threadTs: '100.000000' }])
+})
+
+test('own reply in the thread found by the pre-send check closes the item instead of sending', async () => {
+  const e = await setup()
+  await matureThreadItem(e)
+  const sent = await propose(e, ['a', 'b'])
+  e.slack.repl['C1:100.000000'] = [{ ts: '106.000000', user: 'ME', text: 'ответил руками' }, { ts: '107.000000', user: 'U5', text: 'спасибо' }]
+  await e.callback('pa:choose:1:1', sent.id)
+
+  expect(e.slack.posted).toEqual([])
+  expect(e.state.items['1']!.status).toBe('answered_manually')
+  expect(e.api.lastEdit(sent.id)!.text).toEndWith('🙈 отвечено вручную')
+  expect(e.api.lastEdit(sent.id)!.opts.reply_markup).toEqual({ inline_keyboard: [] })
+  expect(e.api.last().text).toBe('🙈 #1 — ты уже ответил в треде')
+})
+
+const channelTop = (ts: string, user: string, text: string, threadTs?: string): SlackMsg =>
+  ({ channel: 'C1', ts, user, userName: `User ${user}`, text, ...(threadTs ? { threadTs } : {}) })
+
+test('own thread reply under a top-level channel question closes it; own top-level message closes nothing', async () => {
+  const e = await setup()
+  e.collector.queue.push({ msg: channelTop('200.000000', 'U2', 'Кто знает, почему CI красный?'), source: 'channel' })
+  e.collector.queue.push({ msg: channelTop('201.000000', 'U3', 'А где доки по деплою?'), source: 'channel' })
+  await e.orch.tick()
+  e.collector.queue.push({ msg: channelTop('202.000000', 'ME', 'Всем привет, я сегодня на созвонах'), source: 'channel' })
+  await e.orch.tick()
+  expect(Object.values(e.state.items).map((i) => i.status)).toEqual(['settling', 'settling'])
+
+  e.collector.queue.push({ msg: channelTop('203.000000', 'ME', 'Смотрю', '200.000000'), source: 'channel' })
+  await e.orch.tick()
+  expect(e.state.items['1']!.status).toBe('answered_manually')
+  expect(e.state.items['2']!.status).toBe('settling')
+})
+
+test('own top-level message in an IM closes that IM\'s items; in an MPIM it does not', async () => {
+  const e = await setup()
+  const dm = (channel: string, ts: string, user: string): SlackMsg => ({ channel, ts, user, text: `${user} ${ts}` })
+  e.collector.queue.push({ msg: dm('D1', '300.000000', 'U2'), source: 'im' }, { msg: dm('G1', '300.000000', 'U2'), source: 'mpim' })
+  await e.orch.tick()
+  e.collector.queue.push({ msg: dm('D1', '301.000000', 'ME'), source: 'im' }, { msg: dm('G1', '301.000000', 'ME'), source: 'mpim' })
+  await e.orch.tick()
+  expect(e.state.items['1']).toMatchObject({ channel: 'D1', status: 'answered_manually' })
+  expect(e.state.items['2']).toMatchObject({ channel: 'G1', status: 'settling' })
+})
+
+test('an addendum during triage joins the item: session gets kind=update, Telegram gets nothing', async () => {
+  const e = await setup()
+  await matureThreadItem(e)
+  e.notes.length = 0
+  e.collector.queue.push({ msg: threadMsg('111.000000', 'и ещё: на ветке main'), source: 'channel' })
+  await e.orch.tick()
+  await e.flush()
+
+  expect(Object.keys(e.state.items)).toEqual(['1'])
+  expect(e.state.items['1']!.messages.map((m) => m.ts)).toEqual(['105.000000', '111.000000'])
+  expect(e.state.items['1']!.status).toBe('triage')
+  expect(e.notes.map((n) => n.meta)).toEqual([{ kind: 'update', item_id: '1', source: 'ping-assistant' }])
+  expect(e.api.sent).toEqual([])
 })

@@ -175,3 +175,33 @@ test('mature works on state loaded from disk', () => {
   expect(m).toHaveLength(1)
   expect(m[0]!.status).toBe('triage')
 })
+
+test('own thread reply closes thread-matched items only, including a top-level item whose thread it is', () => {
+  const s = emptyState()
+  ingest(s, msg({ channel: 'C1', ts: '10.000000', user: 'UBOB' }), 'channel', T0, cfg) // top-level question
+  ingest(s, msg({ channel: 'C1', ts: '11.000000', user: 'UCAROL' }), 'channel', T0, cfg) // another top-level
+  ingest(s, msg({ channel: 'C1', ts: '12.000000', threadTs: '5.000000', user: 'UDAN' }), 'channel', T0, cfg) // other thread
+  expect(ingest(s, msg({ channel: 'C1', ts: '13.000000', user: 'UILYA' }), 'channel', T0, cfg)).toEqual({ kind: 'dropped', reason: 'own' })
+  const ev = ingest(s, msg({ channel: 'C1', ts: '14.000000', threadTs: '10.000000', user: 'UILYA' }), 'channel', T0, cfg)
+  expect(ev).toEqual({ kind: 'answered_manually', itemIds: ['1'] })
+  expect(Object.values(s.items).map((i) => i.status)).toEqual(['answered_manually', 'settling', 'settling'])
+})
+
+test('own top-level IM message closes every open item of that IM; MPIM top-level closes nothing', () => {
+  const s = emptyState()
+  ingest(s, msg({ channel: 'D1', user: 'UBOB' }), 'im', T0, cfg)
+  ingest(s, msg({ channel: 'D1', threadTs: '1.0', user: 'UBOB' }), 'im', T0, cfg)
+  ingest(s, msg({ channel: 'G1', user: 'UBOB' }), 'mpim', T0, cfg)
+  expect(ingest(s, msg({ channel: 'G1', user: 'UILYA' }), 'mpim', T0, cfg)).toEqual({ kind: 'dropped', reason: 'own' })
+  expect(ingest(s, msg({ channel: 'D1', user: 'UILYA' }), 'im', T0, cfg)).toEqual({ kind: 'answered_manually', itemIds: ['1', '2'] })
+})
+
+test('same-author message while the item is in triage is appended', () => {
+  const s = emptyState()
+  ingest(s, msg(), 'im', T0, cfg)
+  const item = Object.values(s.items)[0]!
+  item.status = 'triage'
+  expect(ingest(s, msg(), 'im', T0 + 1000, cfg)).toEqual({ kind: 'appended', itemId: item.id })
+  expect(Object.values(s.items)).toHaveLength(1)
+  expect(item.status).toBe('triage')
+})
