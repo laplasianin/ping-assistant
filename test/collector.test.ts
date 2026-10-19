@@ -42,10 +42,10 @@ const cfg = { userId: 'ME', watchChannels: ['C1'], followUpDays: 7 } as Config
 let slack: FakeSlack
 let state: ReturnType<typeof emptyState>
 let stderr: ReturnType<typeof spyOn>
-const collector = () => new Collector(slack as unknown as SlackClient, cfg, state, '/tmp/ping-assistant-files-test')
+const collector = (config: Config = cfg) => new Collector(slack as unknown as SlackClient, config, state, '/tmp/ping-assistant-files-test')
 /** Ticks and commits the cursors the way the orchestrator does after a successful ingest. */
-const make = () => {
-  const c = collector()
+const make = (config: Config = cfg) => {
+  const c = collector(config)
   return { tick: async (now: number) => { const r = await c.tick(now); applyCursors(state, r); return r.collected } }
 }
 
@@ -443,4 +443,21 @@ test('pre-existing thread root without new replies gets a cursor at the hist cur
   expect(out).toEqual([])
   expect(state.cursors[`thr:C1:${T(50)}`]).toBe(T(100))
   expect(slack.calls.some((c) => c.startsWith('replies'))).toBe(false)
+})
+
+test('selfDmTest: the self-DM is read every tick even without recent activity', async () => {
+  slack.dms = [{ id: 'D1', type: 'im', user: 'U2' }, { id: 'D9', type: 'im', user: 'ME' }]
+  const quiet = () => {
+    state = emptyState()
+    state.cursors = { 'hist:C1': '100.000000', search: '1.0', lastTick: recent(-60), 'hist:D1': recent(-3 * 86400), 'hist:D9': recent(-3 * 86400) }
+    state.tickCount = 1 // not a sweep tick
+    slack.calls = []
+  }
+  const dmReads = () => slack.calls.filter((c) => c.startsWith('history D')).map((c) => c.split(' ')[1])
+  quiet()
+  await make({ ...cfg, dryRun: true, selfDmTest: true }).tick(NOW)
+  expect(dmReads()).toEqual(['D9'])
+  quiet()
+  await make({ ...cfg, dryRun: true }).tick(NOW) // without selfDmTest the self-DM is just another quiet DM
+  expect(dmReads()).toEqual([])
 })

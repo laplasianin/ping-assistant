@@ -114,8 +114,8 @@ export class Collector {
     const readDm = (dm: { id: string; type: 'im' | 'mpim' }) => run(`${dm.type} ${dm.id}`, dm.type, () => this.readDm(dm.id, nowTs))
     const quiet: typeof dms = []
     for (const dm of dms) {
-      if (this.state.cursors[`hist:${dm.id}`] && !this.recentlyActive(dm.id, now)) quiet.push(dm)
-      else await readDm(dm) // active, or new (a new DM on the very first run costs no request)
+      if (this.state.cursors[`hist:${dm.id}`] && !this.recentlyActive(dm.id, now) && !this.isSelfTestDm(dm.id)) quiet.push(dm)
+      else await readDm(dm) // active, the selfDmTest DM, or new (a new DM on the very first run costs no request)
     }
     // Quiet DMs: a round-robin sweep every DM_SWEEP_EVERY ticks; one cut short by the budget resumes next tick
     // after the last DM it read, so no DM is starved by those listed before it.
@@ -167,6 +167,11 @@ export class Collector {
   private recentlyActive(id: string, now: number): boolean {
     const last = this.state.dmActivity?.[id]
     return last !== undefined && Number(last.split('.')[0]) * 1000 >= now - DAY_MS
+  }
+
+  /** selfDmTest: the self-DM is the test inbox, so it is always treated as active. */
+  private isSelfTestDm(id: string): boolean {
+    return this.cfg.dryRun && this.cfg.selfDmTest === true && id === this.state.selfDmChannel
   }
 
   private async readDm(id: string, nowTs: string): Promise<Read> {
