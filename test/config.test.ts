@@ -80,3 +80,13 @@ test('loadSecrets strips matching quotes and a leading export', () => {
   writeFileSync(p, `SLACK_USER_TOKEN="xoxp-unbalanced\nTELEGRAM_BOT_TOKEN=tg'mid'\n`)
   expect(loadSecrets(p)).toEqual({ slackToken: '"xoxp-unbalanced', telegramToken: "tg'mid'" })
 })
+
+test('selfDmTest defaults to false and is accepted together with dryRun', () => {
+  expect(loadConfig(writeJson(base)).selfDmTest).toBe(false)
+  expect(loadConfig(writeJson({ ...base, dryRun: true, selfDmTest: true })).selfDmTest).toBe(true)
+})
+
+test('selfDmTest without dryRun is rejected', () => {
+  expect(() => loadConfig(writeJson({ ...base, selfDmTest: true }))).toThrow('selfDmTest requires dryRun: true')
+  expect(() => loadConfig(writeJson({ ...base, dryRun: false, selfDmTest: true }))).toThrow('selfDmTest requires dryRun: true')
+})

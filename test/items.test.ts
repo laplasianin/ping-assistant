@@ -205,3 +205,40 @@ test('same-author message while the item is in triage is appended', () => {
   expect(Object.values(s.items)).toHaveLength(1)
   expect(item.status).toBe('triage')
 })
+
+const selfCfg: Config = { ...cfg, dryRun: true, selfDmTest: true }
+const selfDm = (over: Partial<SlackMsg> = {}) => msg({ channel: 'DSELF', user: 'UILYA', ...over })
+
+test('selfDmTest: own messages in the self-DM become one item', () => {
+  const s = emptyState()
+  s.selfDmChannel = 'DSELF'
+  const events = [0, 1].map((i) => ingest(s, selfDm(), 'im', T0 + i * 1000, selfCfg))
+  expect(events[0]!.kind).toBe('buffered')
+  expect(events[1]!.kind).toBe('buffered')
+  const items = Object.values(s.items)
+  expect(items).toHaveLength(1)
+  expect(items[0]!.messages).toHaveLength(2)
+  expect(items[0]!.author).toBe('UILYA')
+})
+
+test('selfDmTest off: own messages in the self-DM are dropped as own', () => {
+  const s = emptyState()
+  s.selfDmChannel = 'DSELF'
+  expect(ingest(s, selfDm(), 'im', T0, { ...cfg, dryRun: true })).toEqual({ kind: 'dropped', reason: 'own' })
+  expect(Object.values(s.items)).toHaveLength(0)
+})
+
+test('selfDmTest on without dryRun is ignored defensively', () => {
+  const s = emptyState()
+  s.selfDmChannel = 'DSELF'
+  expect(ingest(s, selfDm(), 'im', T0, { ...cfg, selfDmTest: true })).toEqual({ kind: 'dropped', reason: 'own' })
+})
+
+test('selfDmTest: an own message in another DM still closes items', () => {
+  const s = emptyState()
+  s.selfDmChannel = 'DSELF'
+  ingest(s, msg({ channel: 'D1', user: 'UBOB' }), 'im', T0, selfCfg)
+  const ev = ingest(s, msg({ channel: 'D1', user: 'UILYA' }), 'im', T0 + 1000, selfCfg)
+  expect(ev.kind).toBe('answered_manually')
+  expect(Object.values(s.items)[0]!.status).toBe('answered_manually')
+})

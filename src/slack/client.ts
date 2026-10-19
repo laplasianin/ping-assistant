@@ -147,9 +147,9 @@ export class SlackClient {
     return out
   }
 
-  async listDms(): Promise<{ id: string; type: 'im' | 'mpim' }[]> {
+  async listDms(): Promise<{ id: string; type: 'im' | 'mpim'; user?: string }[]> {
     const chans = await this.getCursorPages('users.conversations', { types: 'im,mpim', exclude_archived: true }, 'channels')
-    return chans.map((c) => ({ id: c.id as string, type: c.is_im ? 'im' : 'mpim' }))
+    return chans.map((c) => (c.is_im ? { id: c.id as string, type: 'im' as const, ...(typeof c.user === 'string' ? { user: c.user } : {}) } : { id: c.id as string, type: 'mpim' as const }))
   }
 
   async channelName(id: string): Promise<string> {

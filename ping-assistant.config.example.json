@@ -10,5 +10,6 @@
   "contextMessages": 30,
   "triageTimeoutSeconds": 600,
   "dryRun": false,
+  "selfDmTest": false,
   "statePath": "~/.config/ping-assistant/state.json"
 }

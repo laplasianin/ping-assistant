@@ -889,3 +889,42 @@ test('our own send for one item in a thread does not close a sibling item as ans
   expect(e.slack.posted.map((p) => p.text)).toEqual(['Ответ A', 'Ответ B'])
   expect(e.api.sent.some((s) => s.text.includes('ты уже ответил'))).toBe(false)
 })
+
+const selfDmMsg = (ts: string, text: string): SlackMsg =>
+  ({ channel: 'D9', ts, user: 'ME', userName: 'Me', text, permalink: `https://slack/D9/${ts}` })
+
+test('selfDmTest: self-DM item goes through choose to a dry-run send, nothing posted', async () => {
+  const st = emptyState()
+  st.selfDmChannel = 'D9'
+  const e = await setup({ dryRun: true, selfDmTest: true }, st)
+  e.collector.queue.push({ msg: selfDmMsg('105.000000', 'Тестовый вопрос?'), source: 'im' })
+  await e.orch.tick()
+  e.advance(91_000)
+  await e.orch.tick()
+  await e.flush()
+  expect(e.state.items['1']!.status).toBe('triage')
+  const sent = await propose(e, ['a', 'b'])
+  await e.callback('pa:choose:1:1', sent.id)
+
+  expect(e.slack.posted).toEqual([])
+  expect(e.state.items['1']!.status).toBe('sent')
+  expect(e.state.items['1']!.sentTs).toBe('dry-run')
+  expect(e.api.sent.some((s) => s.text.startsWith('🧪 dry-run, отправил бы'))).toBe(true)
+})
+
+test('selfDmTest: a new own self-DM message counts as foreign in the pre-send check, not as a manual answer', async () => {
+  const st = emptyState()
+  st.selfDmChannel = 'D9'
+  const e = await setup({ dryRun: true, selfDmTest: true }, st)
+  e.collector.queue.push({ msg: selfDmMsg('105.000000', 'Тестовый вопрос?'), source: 'im' })
+  await e.orch.tick()
+  e.advance(91_000)
+  await e.orch.tick()
+  await e.flush()
+  const sent = await propose(e, ['a', 'b'])
+  e.slack.hist.D9 = [{ ts: '110.000000', user: 'ME', text: 'ещё одно' }]
+  await e.callback('pa:choose:1:1', sent.id)
+
+  expect(e.state.items['1']!.status).not.toBe('answered_manually')
+  expect(e.state.items['1']!.status).not.toBe('sent')
+})

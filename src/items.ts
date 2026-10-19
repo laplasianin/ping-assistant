@@ -62,7 +62,8 @@ export function ingest(state: State, m: SlackMsg, source: ItemSource, now: numbe
   const key = conversationKey(m)
   const sameKey = Object.values(state.items).filter((i) => itemKey(i) === key)
 
-  if (m.user === cfg.userId) {
+  const selfTest = cfg.dryRun && cfg.selfDmTest === true && m.channel === state.selfDmChannel
+  if (m.user === cfg.userId && !selfTest) {
     const closed = answeredBy(state, m, source)
     if (closed.length === 0) return { kind: 'dropped', reason: 'own' }
     for (const i of closed) i.status = 'answered_manually'

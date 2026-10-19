@@ -8,7 +8,7 @@ const NOW = Date.UTC(2026, 9, 19, 12, 0, 0)
 const NOW_TS = `${NOW / 1000}.000000`
 
 class FakeSlack {
-  dms: { id: string; type: 'im' | 'mpim' }[] = []
+  dms: { id: string; type: 'im' | 'mpim'; user?: string }[] = []
   hist: Record<string, RawMsg[]> = {}
   repl: Record<string, RawMsg[]> = {}
   mentions: RawMsg[] = []
@@ -405,4 +405,16 @@ test('a mention found in a DM keeps the DM source', async () => {
   slack.mentions = [{ ts: recent(-5), channel: 'D1', user: 'U2', text: '<@ME> глянь', dm: 'im' }]
   const out = await make().tick(NOW)
   expect(out.map((o) => [o.msg.channel, o.source])).toEqual([['D1', 'im']])
+})
+
+test('stores selfDmChannel when the IM counterpart is the configured user', async () => {
+  slack.dms = [{ id: 'D1', type: 'im', user: 'U2' }, { id: 'D9', type: 'im', user: 'ME' }, { id: 'G1', type: 'mpim' }]
+  await make().tick(NOW)
+  expect(state.selfDmChannel).toBe('D9')
+})
+
+test('selfDmChannel stays undefined without a self IM', async () => {
+  slack.dms = [{ id: 'D1', type: 'im', user: 'U2' }]
+  await make().tick(NOW)
+  expect(state.selfDmChannel).toBeUndefined()
 })

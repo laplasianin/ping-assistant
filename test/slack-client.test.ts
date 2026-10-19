@@ -176,3 +176,8 @@ test('searchMentions marks hits in IMs and MPIMs', async () => {
   const out = await new SlackClient('t', fetchImpl).searchMentions('U1', '2026-10-01')
   expect(out.map((m) => [m.channel, m.dm])).toEqual([['D1', 'im'], ['G1', 'mpim'], ['C1', undefined]])
 })
+
+test('listDms returns the IM counterpart user', async () => {
+  const { fetchImpl } = fake([json({ ok: true, channels: [{ id: 'D1', is_im: true, user: 'U7' }, { id: 'G1', is_mpim: true }] })])
+  expect(await new SlackClient('t', fetchImpl).listDms()).toEqual([{ id: 'D1', type: 'im', user: 'U7' }, { id: 'G1', type: 'mpim' }])
+})

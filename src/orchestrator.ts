@@ -328,7 +328,8 @@ export class Orchestrator {
       .filter((r) => cmpTs(r.ts, floor) > 0 && r.user && !r.bot_id && r.subtype !== 'bot_message')
       // Messages already known (our own sends for sibling items, items already collected) are neither news nor Ilya's manual answer.
       .filter((r) => !this.d.state.msgIndex[`${item.channel}:${r.ts}`])
-    const ownCloses = threadTs !== undefined || item.source === 'im'
+    const ownCloses = (threadTs !== undefined || item.source === 'im')
+      && !(cfg.dryRun && cfg.selfDmTest === true && item.channel === this.d.state.selfDmChannel) // selfDmTest: own self-DM messages are foreign
     const answered = ownCloses && raws.some((r) => r.user === cfg.userId)
     const fresh = raws.filter((r) => !ownCloses || r.user !== cfg.userId).map((r) => this.toMsg(r, item.channel))
     return { fresh, answered }

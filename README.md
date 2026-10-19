@@ -72,6 +72,7 @@ cp ping-assistant.config.example.json ping-assistant.config.json
 | `contextMessages` | сколько сообщений контекста подтягивать к айтему (30) |
 | `triageTimeoutSeconds` | через сколько секунд без разбора прислать «⏳ #N без разбора» и разбудить сессию ещё раз (600) |
 | `dryRun` | `true`: ничего не отправляется в Slack, в Telegram приходит «🧪 dry-run, отправил бы …» |
+| `selfDmTest` | только вместе с `dryRun: true`: сообщения в личке с самим собой считаются чужими, чтобы тестировать без коллег (`false`) |
 | `statePath` | файл состояния (`~/.config/ping-assistant/state.json`) |
 
 **Начинай с `"dryRun": true`.**

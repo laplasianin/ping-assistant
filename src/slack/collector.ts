@@ -150,9 +150,12 @@ export class Collector {
     return remove
   }
 
-  private async listDms(): Promise<{ id: string; type: 'im' | 'mpim' }[]> {
+  private async listDms(): Promise<{ id: string; type: 'im' | 'mpim'; user?: string }[]> {
     try {
-      return await this.slack.listDms()
+      const dms = await this.slack.listDms()
+      const self = dms.find((d) => d.type === 'im' && d.user === this.cfg.userId)
+      if (self) this.state.selfDmChannel = self.id
+      return dms
     } catch (err) {
       if (err instanceof BudgetExceeded) this.exhausted = true
       else log('listDms', err)

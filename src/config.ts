@@ -7,7 +7,7 @@ export type Config = {
   userId: string; watchChannels: string[]; telegramChatId: string;
   pollSeconds: number; settleSeconds: number; maxSettleSeconds: number;
   followUpDays: number; contextMessages: number; scentbirdRepoPath: string; triageTimeoutSeconds: number;
-  dryRun: boolean; statePath: string;
+  dryRun: boolean; selfDmTest?: boolean; statePath: string;
 }
 
 function expandHome(p: string): string {
@@ -28,6 +28,7 @@ const ConfigSchema = z.object({
   triageTimeoutSeconds: z.number().positive().default(600),
   scentbirdRepoPath: z.string().min(1),
   dryRun: z.boolean().default(false),
+  selfDmTest: z.boolean().default(false),
   statePath: z.string().default('~/.config/ping-assistant/state.json'),
 })
 
@@ -38,6 +39,7 @@ export function loadConfig(path = 'ping-assistant.config.json'): Config {
     const details = result.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')
     throw new Error(`Invalid config ${path}: ${details}`)
   }
+  if (result.data.selfDmTest && !result.data.dryRun) throw new Error(`Invalid config ${path}: selfDmTest requires dryRun: true`)
   return { ...result.data, statePath: expandHome(result.data.statePath) }
 }
 

@@ -31,6 +31,7 @@ channel = new Channel(orchestrator.handlers())
 await channel.connect()
 orchestrator.start()
 log(`started${cfg.dryRun ? ' (dry-run)' : ''}, polling every ${cfg.pollSeconds}s`)
+if (cfg.dryRun && cfg.selfDmTest) log('selfDmTest ON (dry-run): own messages in the self-DM become items')
 tg.start().catch((err) => log(`telegram stopped: ${err instanceof Error ? err.name : 'unknown'}`))
 
 // Self-test hook: one synthetic notification, to check that a channel event reaches the session.
