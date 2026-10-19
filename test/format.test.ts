@@ -58,11 +58,17 @@ describe('other renders', () => {
     const { text, keyboard } = renderThreadChanged(item(), [msg('новое')])
     expect(text).toBe('#14 · в треде появилось новое:\n\nновое')
     expect(keyboard).toEqual([[{ label: 'Всё равно отправить', data: 'pa:force:14' }, { label: 'Отмена', data: 'pa:cancel:14' }]])
-    expect(renderUpdate(item(), [msg('a'), msg('b')], )).toBe('#14 дополнение\n\na\n\nb')
+    expect(renderUpdate(item(), [msg('a'), msg('b')])).toBe('#14 дополнение\n\na\n\nb')
+  })
+  test('renderUpdate and renderThreadChanged humanize mentions', () => {
+    const m = [msg('привет <@U2>')]
+    expect(renderUpdate(item(), m, { U2: 'Имя' })).toBe('#14 дополнение\n\nпривет @Имя')
+    expect(renderThreadChanged(item(), m, { U2: 'Имя' }).text).toBe('#14 · в треде появилось новое:\n\nпривет @Имя')
   })
   test('outcome', () => {
     expect(outcome(item({ status: 'sent' }), 2)).toBe('✅ отправлен вариант 2')
     expect(outcome(item({ status: 'sent' }))).toBe('✅ отправлено')
+    expect(outcome(item({ status: 'sent' }), 'custom')).toBe('✅ отправлено (свой текст)')
     expect(outcome(item({ status: 'skipped' }))).toBe('⏭ пропущен')
     expect(outcome(item({ status: 'answered_manually' }))).toBe('🙈 отвечено вручную')
     expect(outcome(item({ status: 'awaiting' }))).toBe('✏️ правка ниже')

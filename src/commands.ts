@@ -24,8 +24,11 @@ function applyRules(itemId: string, rest: string): Command {
 export function parseText(text: string, quotedItemId?: string): Command {
   const t = text.trim()
   const m = LEADING_ID.exec(t)
-  if (m) return applyRules(m[1], t.slice(m[0].length))
-  if (quotedItemId) return applyRules(quotedItemId, t)
+  if (quotedItemId) {
+    if (m && m[1] === quotedItemId) return applyRules(quotedItemId, t.slice(m[0].length))
+    return applyRules(quotedItemId, t)
+  }
+  if (m) return applyRules(m[1] ?? '', t.slice(m[0].length))
   return { kind: 'forward', text: t }
 }
 

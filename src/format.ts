@@ -60,10 +60,13 @@ export function renderItem(
   return { text: parts.join('\n\n'), keyboard }
 }
 
-const plain = (msgs: SlackMsg[]): string => msgs.map((m) => humanizeSlack(m.text, {}, {})).join('\n\n')
+const plain = (msgs: SlackMsg[], users: Record<string, string>, channels: Record<string, string>): string =>
+  quote(msgs, users, channels)
 
-export function renderUpdate(item: Item, newMsgs: SlackMsg[]): string {
-  return `#${item.id} дополнение\n\n${plain(newMsgs)}`
+export function renderUpdate(
+  item: Item, newMsgs: SlackMsg[], users: Record<string, string> = {}, channels: Record<string, string> = {},
+): string {
+  return `#${item.id} дополнение\n\n${plain(newMsgs, users, channels)}`
 }
 
 export function renderProposal(item: Item, text: string): { text: string; keyboard: Keyboard } {
@@ -76,9 +79,11 @@ export function renderProposal(item: Item, text: string): { text: string; keyboa
   }
 }
 
-export function renderThreadChanged(item: Item, newMsgs: SlackMsg[]): { text: string; keyboard: Keyboard } {
+export function renderThreadChanged(
+  item: Item, newMsgs: SlackMsg[], users: Record<string, string> = {}, channels: Record<string, string> = {},
+): { text: string; keyboard: Keyboard } {
   return {
-    text: `#${item.id} · в треде появилось новое:\n\n${plain(newMsgs)}`,
+    text: `#${item.id} · в треде появилось новое:\n\n${plain(newMsgs, users, channels)}`,
     keyboard: [[
       { label: 'Всё равно отправить', data: callbackData({ kind: 'force', itemId: item.id }) },
       { label: 'Отмена', data: callbackData({ kind: 'cancel', itemId: item.id }) },
@@ -86,9 +91,11 @@ export function renderThreadChanged(item: Item, newMsgs: SlackMsg[]): { text: st
   }
 }
 
-export function outcome(item: Item, chosen?: number): string {
+export function outcome(item: Item, chosen?: number | 'custom'): string {
   switch (item.status) {
-    case 'sent': return chosen === undefined ? '✅ отправлено' : `✅ отправлен вариант ${chosen}`
+    case 'sent':
+      if (chosen === undefined) return '✅ отправлено'
+      return chosen === 'custom' ? '✅ отправлено (свой текст)' : `✅ отправлен вариант ${chosen}`
     case 'skipped': return '⏭ пропущен'
     case 'answered_manually': return '🙈 отвечено вручную'
     case 'awaiting': return '✏️ правка ниже'
