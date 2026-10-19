@@ -14,6 +14,8 @@
       "Agent",
       "Bash(git log:*)",
       "Bash(git show:*)",
+      "Bash(git -C /Users/ilebedyuk/projects/scentbird/backend log:*)",
+      "Bash(git -C /Users/ilebedyuk/projects/scentbird/backend show:*)",
       "mcp__plugin_atlassian_atlassian__getJiraIssue",
       "mcp__plugin_atlassian_atlassian__searchJiraIssuesUsingJql",
       "mcp__plugin_atlassian_atlassian__searchConfluence",

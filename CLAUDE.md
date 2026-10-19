@@ -161,9 +161,12 @@ README). Тяжёлый ресёрч и написание вариантов д
 - **technical** — строго read-only в репозитории Scentbird: путь — `scentbirdRepoPath` из
   `ping-assistant.config.json` в корне этого проекта. Найти код по теме, недавние изменения и
   миграции, вернуть «что происходит, где, что менялось недавно, гипотезу» со ссылками на файлы
-  (`path/to/File.java:123`). В разборе цитируй файлы. Ничего не менять; из команд доступны
-  только `git log` и `git show` (история изменений по теме). Субагент может читать через
-  `Explore`, но не создаёт новых субагентов.
+  (`path/to/File.java:123`). В разборе цитируй файлы. Репозиторий подключён к сессии через
+  `--add-dir`, поэтому `Read`/`Grep`/`Glob` по абсолютным путям внутри него работают; текущий
+  каталог сессии — это сам Ping Assistant, не Scentbird. Ничего не менять; из команд доступны
+  только история изменений в форме `git -C <scentbirdRepoPath> log …` и
+  `git -C <scentbirdRepoPath> show …` (путь подставляй целиком, другие формы `git` запрещены).
+  Субагент может читать через `Explore`, но не создаёт новых субагентов.
 - **product** — Confluence и Jira через Atlassian MCP (`search`, `searchConfluence`,
   `getConfluenceContent`, `searchJiraIssuesUsingJql`, `getJiraIssue`) и поиск по Slack
   через claude.ai-коннектор (`slack_search_*`, `slack_read_thread`). При необходимости — код,
