@@ -110,3 +110,13 @@ test('loadConfig keeps explicit drainSeconds and socketReconcileTicks; rejects a
   expect([cfg.drainSeconds, cfg.socketReconcileTicks]).toEqual([2, 4])
   expect(() => loadConfig(writeJson({ ...base, socketReconcileTicks: 1.5 }))).toThrow(/socketReconcileTicks/)
 })
+
+test('loadSecrets strips trailing comments: unquoted after " #", quoted after the closing quote', () => {
+  const p = join(tmp(), '.env')
+  writeFileSync(p, `SLACK_USER_TOKEN=xoxp-1   # user token\nTELEGRAM_BOT_TOKEN="tg #not-a-comment" # bot\nSLACK_APP_TOKEN=xapp-1#kept\n`)
+  expect(loadSecrets(p)).toEqual({ slackToken: 'xoxp-1', telegramToken: 'tg #not-a-comment', slackAppToken: 'xapp-1#kept' })
+})
+
+test('drainSeconds below 1 is rejected', () => {
+  expect(() => loadConfig(writeJson({ ...base, drainSeconds: 0.5 }))).toThrow(/drainSeconds/)
+})

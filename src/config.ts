@@ -31,7 +31,7 @@ const ConfigSchema = z.object({
   dryRun: z.boolean().default(false),
   selfDmTest: z.boolean().default(false),
   statePath: z.string().default('~/.config/ping-assistant/state.json'),
-  drainSeconds: z.number().positive().default(5),
+  drainSeconds: z.number().min(1).default(5),
   socketReconcileTicks: z.number().int().positive().default(10),
 })
 
@@ -46,6 +46,17 @@ export function loadConfig(path = 'ping-assistant.config.json'): Config {
   return { ...result.data, statePath: expandHome(result.data.statePath) }
 }
 
+/** A quoted value ends at its closing quote; an unquoted one at ` #` (a trailing comment). */
+function envValue(value: string): string {
+  const q = value[0]
+  if (q === '"' || q === "'") {
+    const close = value.indexOf(q, 1)
+    if (close > 0 && /^\s*(#.*)?$/.test(value.slice(close + 1))) return value.slice(1, close)
+    return value
+  }
+  return value.replace(/\s+#.*$/, '')
+}
+
 function parseEnvFile(path: string): Record<string, string> {
   if (!existsSync(path)) return {}
   const out: Record<string, string> = {}
@@ -54,9 +65,7 @@ function parseEnvFile(path: string): Record<string, string> {
     if (!trimmed || trimmed.startsWith('#')) continue
     const eq = trimmed.indexOf('=')
     if (eq < 0) continue
-    const value = trimmed.slice(eq + 1).trim()
-    const quoted = value.length >= 2 && (value[0] === '"' || value[0] === "'") && value.at(-1) === value[0]
-    out[trimmed.slice(0, eq).trim()] = quoted ? value.slice(1, -1) : value
+    out[trimmed.slice(0, eq).trim()] = envValue(trimmed.slice(eq + 1).trim())
   }
   return out
 }
