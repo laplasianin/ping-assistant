@@ -6,6 +6,7 @@ import type { Config } from '../src/config'
 
 const NOW = Date.UTC(2026, 9, 19, 12, 0, 0)
 const NOW_TS = `${NOW / 1000}.000000`
+const DAY = 86_400_000
 
 class FakeSlack {
   dms: { id: string; type: 'im' | 'mpim'; user?: string }[] = []
@@ -607,4 +608,105 @@ test('dm search: a hit DM whose read fails outright does not pin the floor', asy
   await make().tick(NOW)
   expect(state.cursors.dmsearch).toBe(recent(-630))
   expect(state.cursors['hist:D1']).toBe(recent(-3 * 86400))
+})
+
+// Socket Mode: queued events are drained before the polling sources.
+const sockCfg = { ...cfg, socketReconcileTicks: 3 } as Config
+const at = (s: number) => `${NOW / 1000 + s}.000100`
+/** A collector with the socket up, past its first (connect) tick, so every cursor below has been polled. */
+const connected = async (config: Config = sockCfg) => {
+  slack.dms = [{ id: 'D1', type: 'im' }]
+  const c = collector(config)
+  c.socketConnected = true
+  const tick = async (now: number) => { const r = await c.tick(now); applyCursors(state, r); return r }
+  await tick(NOW) // first run: cursors at now, all noted as polled
+  return { c, tick }
+}
+
+test('socket: an enqueued IM message is collected as im without a history read; hist: cursor advanced', async () => {
+  const { c, tick } = await connected()
+  slack.calls = []
+  c.enqueue({ channel: 'D1', ts: at(5), user: 'U2', text: 'hi' }, 'im')
+  const r = await tick(NOW + 10_000)
+  expect(r.collected.map((o) => [o.msg.channel, o.msg.ts, o.source])).toEqual([['D1', at(5), 'im']])
+  expect(r.collected[0]!.msg).toMatchObject({ userName: 'User U2', permalink: `https://slack/D1/${at(5)}`, text: 'hi' })
+  expect(state.cursors['hist:D1']).toBe(at(5))
+  expect(state.dmActivity?.D1).toBe(at(5))
+  expect(slack.calls).toEqual([])
+})
+
+test('socket: channel sources — watch channel, mention elsewhere, watched-thread follow-up; unrelated dropped', async () => {
+  state.watchedThreads['C2:5.0'] = { until: NOW + DAY }
+  state.cursors['thr:C2:5.0'] = '5.0'
+  const { c, tick } = await connected()
+  c.enqueue({ channel: 'C1', ts: at(1), user: 'U2', text: 'in watch channel' }, 'channel')
+  c.enqueue({ channel: 'C9', ts: at(2), user: 'U2', text: 'hey <@ME> look' }, 'channel')
+  c.enqueue({ channel: 'C2', ts: at(3), thread_ts: '5.0', user: 'U3', text: 'follow' }, 'group')
+  c.enqueue({ channel: 'C9', ts: at(4), user: 'U2', text: 'not for me' }, 'channel')
+  c.enqueue({ channel: 'C9', ts: at(5), thread_ts: '7.0', user: 'U2', text: 'unwatched thread' }, 'channel')
+  const r = await tick(NOW + 10_000)
+  expect(r.collected.map((o) => [o.msg.channel, o.source])).toEqual([['C1', 'channel'], ['C9', 'mention'], ['C2', 'followup']])
+  expect(state.cursors['hist:C1']).toBe(at(1))
+  expect(state.cursors['hist:C9']).toBeUndefined()
+  expect(state.cursors['thr:C2:5.0']).toBe(at(3)) // the connect tick's poll read that thread
+})
+
+test('socket: duplicates of indexed or already-queued messages, bot messages and edits are dropped', async () => {
+  const { c, tick } = await connected()
+  state.msgIndex[`D1:${at(1)}`] = 'i1'
+  c.enqueue({ channel: 'D1', ts: at(1), user: 'U2', text: 'known' }, 'im')
+  c.enqueue({ channel: 'D1', ts: at(2), user: 'U2', text: 'redelivered' }, 'im')
+  c.enqueue({ channel: 'D1', ts: at(2), user: 'U2', text: 'redelivered' }, 'im')
+  c.enqueue({ channel: 'D1', ts: at(3), bot_id: 'B1', text: 'bot' }, 'im')
+  c.enqueue({ channel: 'D1', ts: at(4), subtype: 'message_changed', text: '' }, 'im')
+  const r = await tick(NOW + 10_000)
+  expect(r.collected.map((o) => o.msg.ts)).toEqual([at(2)])
+})
+
+test('socket: a message already collected from the queue is not collected again by the poll in the same tick', async () => {
+  const { c, tick } = await connected({ ...sockCfg, socketReconcileTicks: 1 })
+  slack.hist = { D1: [{ ts: at(2), user: 'U2', text: 'hi' }] }
+  slack.mentions = [{ ts: at(2), channel: 'D1', user: 'U2', text: 'hi <@ME>', dm: 'im' }]
+  c.enqueue({ channel: 'D1', ts: at(2), user: 'U2', text: 'hi' }, 'im')
+  const r = await tick(NOW + 10_000)
+  expect(r.collected.map((o) => [o.msg.ts, o.source])).toEqual([[at(2), 'im']])
+})
+
+test('socket: a cursor no poll has read since the socket came up is not advanced by a socket message', async () => {
+  slack.dms = [{ id: 'D1', type: 'im' }]
+  state.cursors = { 'hist:D1': '100.000000', 'hist:C1': NOW_TS, search: NOW_TS, dmsearch: NOW_TS, lastTick: NOW_TS }
+  const c = collector(sockCfg)
+  c.socketConnected = true
+  c.enqueue({ channel: 'D1', ts: at(5), user: 'U2', text: 'hi' }, 'im')
+  const r = await c.tick(NOW + 10_000) // the connect tick polls, but the quiet D1 is not read
+  applyCursors(state, r)
+  expect(r.collected.map((o) => o.source)).toEqual(['im'])
+  expect(state.cursors['hist:D1']).toBe('100.000000')
+})
+
+test('socket: while connected, polling runs on the connect tick and then every socketReconcileTicks-th tick', async () => {
+  state.cursors = { 'hist:C1': NOW_TS, search: NOW_TS, dmsearch: NOW_TS, lastTick: NOW_TS }
+  const c = collector(sockCfg)
+  const polls: boolean[] = []
+  const tick = async (i: number) => {
+    const before = slack.searchArgs.length
+    const r = await c.tick(NOW + i * 5000)
+    applyCursors(state, r)
+    polls.push(slack.searchArgs.length > before)
+  }
+  c.socketConnected = true
+  for (let i = 1; i <= 7; i++) await tick(i)
+  expect(polls).toEqual([true, false, false, true, false, false, true])
+  expect(state.tickCount).toBe(3) // tickCount counts polls (the DM sweep tiers are poll-relative)
+  expect(state.cursors.lastTick).toBe(`${(NOW + 7 * 5000) / 1000}.000000`)
+
+  c.socketConnected = false
+  polls.length = 0
+  for (let i = 8; i <= 9; i++) await tick(i)
+  expect(polls).toEqual([true, true])
+
+  c.socketConnected = true // reconnected: poll at once to read what arrived while it was down
+  polls.length = 0
+  for (let i = 10; i <= 12; i++) await tick(i)
+  expect(polls).toEqual([true, false, false])
 })

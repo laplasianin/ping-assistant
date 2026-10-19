@@ -8,6 +8,7 @@ export type Config = {
   pollSeconds: number; settleSeconds: number; maxSettleSeconds: number;
   followUpDays: number; contextMessages: number; scentbirdRepoPath: string; triageTimeoutSeconds: number;
   dryRun: boolean; selfDmTest?: boolean; statePath: string;
+  socketReconcileTicks: number;
 }
 
 function expandHome(p: string): string {
@@ -30,6 +31,7 @@ const ConfigSchema = z.object({
   dryRun: z.boolean().default(false),
   selfDmTest: z.boolean().default(false),
   statePath: z.string().default('~/.config/ping-assistant/state.json'),
+  socketReconcileTicks: z.number().int().positive().default(10),
 })
 
 export function loadConfig(path = 'ping-assistant.config.json'): Config {

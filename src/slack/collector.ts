@@ -3,6 +3,8 @@ import { join } from 'node:path'
 import type { Config } from '../config'
 import type { ItemSource, SlackMsg, State } from '../state'
 import { BudgetExceeded, type RawMsg, type SlackClient } from './client'
+import { SocketQueue } from './queue'
+import type { ChannelType } from './socket'
 
 export type Collected = { msg: SlackMsg; source: ItemSource }
 /**
@@ -62,6 +64,55 @@ export class Collector {
 
   /** Set when the tick's Slack request budget runs out: the remaining sources wait for the next tick. */
   private exhausted = false
+  private readonly queue = new SocketQueue()
+
+  /** Set from SlackSocket.isConnected(): while true, the polling sources run only every socketReconcileTicks ticks. */
+  get socketConnected(): boolean { return this.queue.connected }
+  set socketConnected(v: boolean) { this.queue.connected = v }
+
+  /** A Socket Mode message event; collected on the next tick. */
+  enqueue(raw: RawMsg & { channel: string }, channelType: ChannelType): void {
+    this.queue.push(raw, channelType)
+  }
+
+  /** Filters (subtypes, bots), dedupes (msgIndex, this tick's seen set) and maps one source's raws. */
+  private async accept(raws: RawMsg[], source: ItemSource, seen: Map<string, Collected>): Promise<Collected[]> {
+    const built: Collected[] = []
+    const local = new Map<string, Collected>()
+    for (const raw of raws) {
+      const key = `${raw.channel}:${raw.ts}`
+      if (SKIP_SUBTYPES.has(raw.subtype ?? '') || raw.bot_id || !raw.channel) continue
+      const earlier = seen.get(key)
+      // Mentions are read before DMs: a DM read of the same message decides that it is a DM item.
+      if (earlier?.source === 'mention' && (source === 'im' || source === 'mpim')) earlier.source = source
+      if (earlier || local.has(key) || this.state.msgIndex[key]) continue
+      const c: Collected = { msg: await this.toMsg(raw as RawMsg & { channel: string }), source: source === 'mention' && raw.dm ? raw.dm : source }
+      local.set(key, c)
+      built.push(c)
+    }
+    for (const [k, c] of local) seen.set(k, c)
+    return built
+  }
+
+  /** Socket messages first: no Slack reads beyond the cached name and permalink lookups. */
+  private async drain(seen: Map<string, Collected>, out: Collected[]): Promise<Record<string, string>> {
+    const cursors: Record<string, string> = {}
+    for (const q of this.queue.take()) {
+      const source = this.queue.source(q, this.cfg, this.state)
+      if (!source) continue
+      try {
+        const built = await this.accept([q.raw], source, seen)
+        if (!built.length) continue
+        out.push(...built)
+        if (source === 'im' || source === 'mpim') (this.state.dmActivity ??= {})[q.raw.channel] = maxTs(this.state.dmActivity?.[q.raw.channel], q.raw.ts)!
+        const key = this.queue.cursorKey(q, source, this.state, cmpTs)
+        if (key) cursors[key] = maxTs(cursors[key], this.state.cursors[key], q.raw.ts)!
+      } catch (err) {
+        log(`socket ${q.channelType} ${q.raw.channel}`, err)
+      }
+    }
+    return cursors
+  }
 
   async tick(now: number): Promise<TickResult> {
     const nowTs = tsOf(now)
@@ -71,7 +122,16 @@ export class Collector {
     const removeCursors = this.expireWatched(now)
     this.slack.resetBudget()
     this.exhausted = false
+    const drained = await this.drain(seen, out)
+    const result = (): TickResult => {
+      // A poll that read the same conversation in this tick staged at least the socket message's ts.
+      for (const [k, v] of Object.entries(drained)) cursorUpdates[k] = maxTs(cursorUpdates[k], v)!
+      return { collected: out.sort((a, b) => cmpTs(a.msg.ts, b.msg.ts)), cursorUpdates, removeCursors }
+    }
+    if (!this.queue.shouldPoll(this.cfg.socketReconcileTicks)) return result()
+
     let deferred = 0
+    // tickCount and lastTick count polls only: the sweep tiers and a new source's start are poll-relative.
     const tickNo = this.state.tickCount ?? 0
     this.state.tickCount = tickNo + 1
 
@@ -80,22 +140,9 @@ export class Collector {
       if (this.exhausted) { deferred++; return false } // cursors untouched: read next tick
       try {
         const { raws, cursors, remove } = await read()
-        const built: Collected[] = []
-        const local = new Map<string, Collected>()
-        for (const raw of raws) {
-          const key = `${raw.channel}:${raw.ts}`
-          if (SKIP_SUBTYPES.has(raw.subtype ?? '') || raw.bot_id || !raw.channel) continue
-          const earlier = seen.get(key)
-          // Mentions are read before DMs: a DM read of the same message decides that it is a DM item.
-          if (earlier?.source === 'mention' && (source === 'im' || source === 'mpim')) earlier.source = source
-          if (earlier || local.has(key) || this.state.msgIndex[key]) continue
-          const c: Collected = { msg: await this.toMsg(raw as RawMsg & { channel: string }), source: source === 'mention' && raw.dm ? raw.dm : source }
-          local.set(key, c)
-          built.push(c)
-        }
-        for (const [k, c] of local) seen.set(k, c)
-        out.push(...built)
+        out.push(...await this.accept(raws, source, seen))
         Object.assign(cursorUpdates, cursors)
+        this.queue.notePolled(cursors)
         removeCursors.push(...(remove ?? []))
         return true
       } catch (err) {
@@ -147,7 +194,7 @@ export class Collector {
 
     if (this.exhausted) process.stderr.write(`ping-assistant: slack request budget exhausted, ${deferred} source(s) deferred to the next tick\n`)
     cursorUpdates.lastTick = nowTs
-    return { collected: out.sort((a, b) => cmpTs(a.msg.ts, b.msg.ts)), cursorUpdates, removeCursors }
+    return result()
   }
 
   /**
