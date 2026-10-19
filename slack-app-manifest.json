@@ -23,8 +23,16 @@
     }
   },
   "settings": {
+    "event_subscriptions": {
+      "user_events": [
+        "message.channels",
+        "message.groups",
+        "message.im",
+        "message.mpim"
+      ]
+    },
     "org_deploy_enabled": false,
-    "socket_mode_enabled": false,
+    "socket_mode_enabled": true,
     "token_rotation_enabled": false
   }
 }
