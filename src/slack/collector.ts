@@ -9,7 +9,7 @@ export type Collected = { msg: SlackMsg; source: ItemSource }
 const SKIP_SUBTYPES = new Set(['message_changed', 'message_deleted', 'channel_join', 'channel_leave', 'bot_message', 'channel_topic', 'channel_purpose'])
 const DAY_MS = 86_400_000
 
-function cmpTs(a: string, b: string): number {
+export function cmpTs(a: string, b: string): number {
   const [as = '0', af = ''] = a.split('.')
   const [bs = '0', bf = ''] = b.split('.')
   return Number(as) - Number(bs) || (af.padEnd(6, '0') < bf.padEnd(6, '0') ? -1 : af.padEnd(6, '0') > bf.padEnd(6, '0') ? 1 : 0)

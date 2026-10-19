@@ -10,7 +10,7 @@ export type Item = {
   messages: SlackMsg[]; context: SlackMsg[]; lastSeenTs: string;
   createdAt: number; lastMessageAt: number;
   analysis?: string; variants?: string[]; pendingText?: string; forceSend?: boolean;
-  telegram: { messageId?: number; proposalMessageId?: number };
+  telegram: { messageId?: number; proposalMessageId?: number; text?: string };  // text: item message without the hint line
   ignoreReason?: string; sentTs?: string;
 }
 export type State = {
