@@ -1,0 +1,30 @@
+{
+  "display_information": {
+    "name": "Ping Assistant",
+    "description": "Personal inbox helper: reads my Slack with my user token and posts replies I approve.",
+    "background_color": "#2c2d30"
+  },
+  "oauth_config": {
+    "scopes": {
+      "user": [
+        "channels:history",
+        "channels:read",
+        "groups:history",
+        "groups:read",
+        "im:history",
+        "im:read",
+        "mpim:history",
+        "mpim:read",
+        "users:read",
+        "search:read",
+        "chat:write",
+        "files:read"
+      ]
+    }
+  },
+  "settings": {
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}
