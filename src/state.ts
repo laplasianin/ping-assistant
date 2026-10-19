@@ -23,6 +23,8 @@ export type State = {
   watchedThreads: Record<string, { until: number }>;  // `${channel}:${threadTs}`
   users: Record<string, string>;              // userId → display name (кэш)
   tickCount?: number;                         // collector ticks so far (quiet DMs are swept every 10th)
+  dmActivity?: Record<string, string>;        // DM id → ts of the newest message actually read from it
+  dmSweepAfter?: string;                      // quiet-DM sweep in progress: id of the last DM it read
   channels: Record<string, string>;           // channelId → name (кэш)
 }
 

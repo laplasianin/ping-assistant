@@ -164,3 +164,15 @@ test('a body that never arrives also times out', async () => {
   const stalled = (async () => ({ status: 200, headers: new Headers(), json: () => new Promise(() => {}) }) as unknown as Response) as typeof fetch
   await expect(new SlackClient('t', stalled, async () => {}, 20).userName('U1')).rejects.toThrow('timed out')
 })
+
+test('searchMentions marks hits in IMs and MPIMs', async () => {
+  const { fetchImpl } = fake([
+    json({ ok: true, messages: { matches: [
+      { ts: '1', user: 'U2', text: 'a', channel: { id: 'D1', is_im: true } },
+      { ts: '2', user: 'U2', text: 'b', channel: { id: 'G1', is_mpim: true } },
+      { ts: '3', user: 'U2', text: 'c', channel: { id: 'C1' } },
+    ], paging: { page: 1, pages: 1 } } }),
+  ])
+  const out = await new SlackClient('t', fetchImpl).searchMentions('U1', '2026-10-01')
+  expect(out.map((m) => [m.channel, m.dm])).toEqual([['D1', 'im'], ['G1', 'mpim'], ['C1', undefined]])
+})

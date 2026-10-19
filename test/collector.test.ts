@@ -302,43 +302,6 @@ test('watch channel: one windowed history read; replies only for threads whose l
   expect(state.cursors['hist:C1']).toBe(T(40))
 })
 
-test('quiet DMs are read every 10th tick only; active and new ones every tick', async () => {
-  const day = 86_400
-  slack.dms = [{ id: 'D1', type: 'im' }, { id: 'D2', type: 'im' }, { id: 'D3', type: 'mpim' }]
-  state.cursors = {
-    'hist:C1': '100.000000', search: '1.0', lastTick: `${NOW / 1000 - 60}.000000`,
-    'hist:D1': `${NOW / 1000 - 3600}.000000`, // active within 24h
-    'hist:D2': `${NOW / 1000 - 2 * day}.000000`, // quiet
-  } // D3 has no cursor: new
-  state.tickCount = 1
-  await make().tick(NOW)
-  const dmReads = () => slack.calls.filter((c) => c.startsWith('history D')).map((c) => c.split(' ')[1])
-  expect(dmReads()).toEqual(['D1', 'D3'])
-  slack.calls = []
-  state.tickCount = 10
-  await make().tick(NOW)
-  expect(dmReads()).toEqual(['D1', 'D2', 'D3'])
-  expect(state.tickCount).toBe(11)
-})
-
-test('request budget: remaining sources are skipped with cursors untouched and one log line', async () => {
-  slack.dms = [{ id: 'D1', type: 'im' }, { id: 'D2', type: 'im' }]
-  state.cursors = { 'hist:D1': '1.0', 'hist:D2': '1.0', 'hist:C1': '1.0', search: '1.0' }
-  slack.hist = { D1: [{ ts: '2.0', user: 'U2', text: 'ok' }], D2: [{ ts: '3.0', user: 'U2', text: 'later' }] }
-  slack.budget = 2 // listDms + D1
-  const out = await make().tick(NOW)
-  expect(out.map((o) => o.msg.text)).toEqual(['ok'])
-  expect(state.cursors).toMatchObject({ 'hist:D1': '2.0', 'hist:D2': '1.0', 'hist:C1': '1.0', search: '1.0' })
-  const lines = stderr.mock.calls.map((c: unknown[]) => String(c[0]))
-  expect(lines).toEqual(['ping-assistant: slack request budget exhausted, 3 source(s) deferred to the next tick\n'])
-
-  slack.budget = Infinity // next tick: the deferred sources resume from their cursors
-  state.tickCount = 10 // D2 is quiet (old cursor): it is read on the sweep tick
-  const next = await make().tick(NOW + 60_000)
-  expect(next.filter((o) => o.msg.channel === 'D2').map((o) => o.msg.text)).toEqual(['later'])
-  expect(state.cursors['hist:D2']).toBe('3.0')
-})
-
 test('search floor trails the newest hit by 600s so a late-indexed mention is still collected', async () => {
   const at = (s: number) => `${NOW / 1000 + s}.000000`
   state.cursors = { ...base, search: at(-3600) }
@@ -351,4 +314,95 @@ test('search floor trails the newest hit by 600s so a late-indexed mention is st
   slack.mentions = [{ ts: at(-300), channel: 'C9', user: 'U3', text: 'indexed late' }, { ts: at(-60), channel: 'C9', user: 'U2', text: 'indexed fast' }]
   expect((await make().tick(NOW + 60_000)).map((o) => o.msg.text)).toEqual(['indexed late'])
   expect(state.cursors.search).toBe(at(-660))
+})
+
+const recent = (s: number) => `${NOW / 1000 + s}.000000`
+
+test('quiet DMs are swept every 10th tick; DMs with real recent activity and new ones every tick', async () => {
+  slack.dms = [{ id: 'D1', type: 'im' }, { id: 'D2', type: 'im' }, { id: 'D3', type: 'mpim' }]
+  state.cursors = {
+    'hist:C1': '100.000000', search: '1.0', lastTick: recent(-60),
+    'hist:D1': recent(-3600), 'hist:D2': recent(-3600), // D2's cursor is only a first-run stamp
+  } // D3 has no cursor: new
+  state.dmActivity = { D1: recent(-3600) } // a message was read from D1 an hour ago
+  state.tickCount = 1
+  await make().tick(NOW)
+  const dmReads = () => slack.calls.filter((c) => c.startsWith('history D')).map((c) => c.split(' ')[1])
+  expect(dmReads()).toEqual(['D1', 'D3'])
+  slack.calls = []
+  state.tickCount = 10
+  await make().tick(NOW)
+  expect(dmReads()).toEqual(['D1', 'D2', 'D3']) // D3 got a cursor on tick 1 but no message: now quiet, swept in id order
+  expect(state.tickCount).toBe(11)
+})
+
+test('a DM read that returns messages marks it active', async () => {
+  slack.dms = [{ id: 'D1', type: 'im' }]
+  state.cursors = { 'hist:C1': '100.000000', search: '1.0', 'hist:D1': recent(-3 * 86400) }
+  slack.hist = { D1: [{ ts: recent(-30), user: 'U2', text: 'hi' }] }
+  await make().tick(NOW) // tick 0 is a sweep
+  expect(state.dmActivity).toEqual({ D1: recent(-30) })
+})
+
+test('request budget: mentions and channels go first; remaining DMs are deferred with cursors untouched', async () => {
+  slack.dms = [{ id: 'D1', type: 'im' }, { id: 'D2', type: 'im' }]
+  state.cursors = { 'hist:D1': recent(-100), 'hist:D2': recent(-100), 'hist:C1': '1.0', search: '1.0' }
+  state.dmActivity = { D1: recent(-100), D2: recent(-100) }
+  state.tickCount = 1
+  slack.hist = { C1: [{ ts: recent(-200), user: 'U4', text: 'channel' }], D1: [{ ts: recent(-50), user: 'U2', text: 'ok' }], D2: [{ ts: recent(-40), user: 'U2', text: 'later' }] }
+  slack.budget = 3 // C1 + listDms + D1
+  const out = await make().tick(NOW)
+  expect(out.map((o) => o.msg.text)).toEqual(['channel', 'ok'])
+  expect(state.cursors).toMatchObject({ 'hist:D1': recent(-50), 'hist:D2': recent(-100), 'hist:C1': recent(-200) })
+  const lines = stderr.mock.calls.map((c: unknown[]) => String(c[0]))
+  expect(lines).toEqual(['ping-assistant: slack request budget exhausted, 1 source(s) deferred to the next tick\n'])
+
+  slack.budget = Infinity // next tick: the deferred DM resumes from its cursor
+  const next = await make().tick(NOW + 60_000)
+  expect(next.filter((o) => o.msg.channel === 'D2').map((o) => o.msg.text)).toEqual(['later'])
+})
+
+test('60 quiet DMs against a budget of 40: the sweep resumes round-robin, so DM #55 is read', async () => {
+  const id = (n: number) => `D${String(n).padStart(2, '0')}`
+  slack.dms = Array.from({ length: 60 }, (_, n) => ({ id: id(n), type: 'im' as const }))
+  state.cursors = { 'hist:C1': '1.0', search: '1.0', lastTick: recent(-60) }
+  for (let n = 0; n < 60; n++) state.cursors[`hist:${id(n)}`] = recent(-2 * 86400)
+  slack.hist = { [id(55)]: [{ ts: recent(-10), user: 'U2', text: 'ау, ты тут?' }] }
+  slack.budget = 40
+  state.tickCount = 10 // sweep tick
+  const c = make()
+  const got: string[] = []
+  const read = new Set<string>()
+  for (let t = 0; t < 3; t++) {
+    slack.calls = []
+    got.push(...(await c.tick(NOW + t * 60_000)).map((o) => o.msg.text))
+    for (const call of slack.calls) if (call.startsWith('history D')) read.add(call.split(' ')[1]!)
+  }
+  expect(read.size).toBe(60) // every DM read within two ticks of the sweep starting
+  expect(got).toContain('ау, ты тут?')
+  expect(state.dmSweepAfter).toBeUndefined() // sweep finished
+})
+
+test('fresh install: no DM counts as active, so tick 2 still reads mentions and watch channels', async () => {
+  slack.dms = Array.from({ length: 60 }, (_, n) => ({ id: `D${n}`, type: 'im' as const }))
+  slack.budget = 40
+  const c = make()
+  await c.tick(NOW) // first run: stamps cursors, costs no DM history request
+  expect(slack.calls.filter((x) => x.startsWith('history D'))).toEqual([])
+  slack.calls = []
+  slack.mentions = [{ ts: recent(30), channel: 'C9', user: 'U2', text: 'mention' }]
+  slack.hist = { C1: [{ ts: recent(40), user: 'U3', text: 'pathfinders' }] }
+  const out = await c.tick(NOW + 60_000)
+  expect(out.map((o) => o.msg.text)).toEqual(['mention', 'pathfinders'])
+  expect(slack.calls.filter((x) => x.startsWith('history D'))).toEqual([])
+  expect(stderr).not.toHaveBeenCalled()
+})
+
+test('a mention found in a DM keeps the DM source', async () => {
+  slack.dms = [{ id: 'D1', type: 'im' }]
+  state.cursors = { 'hist:C1': '100.000000', search: '1.0', 'hist:D1': recent(-3 * 86400) }
+  state.tickCount = 1 // D1 is quiet: not read this tick
+  slack.mentions = [{ ts: recent(-5), channel: 'D1', user: 'U2', text: '<@ME> глянь', dm: 'im' }]
+  const out = await make().tick(NOW)
+  expect(out.map((o) => [o.msg.channel, o.source])).toEqual([['D1', 'im']])
 })

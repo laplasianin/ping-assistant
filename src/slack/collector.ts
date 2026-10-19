@@ -62,7 +62,7 @@ export class Collector {
   async tick(now: number): Promise<TickResult> {
     const nowTs = tsOf(now)
     const out: Collected[] = []
-    const seen = new Set<string>()
+    const seen = new Map<string, Collected>()
     const cursorUpdates: Record<string, string> = {}
     const removeCursors = this.expireWatched(now)
     this.slack.resetBudget()
@@ -76,15 +76,19 @@ export class Collector {
       try {
         const { raws, cursors, remove } = await read()
         const built: Collected[] = []
-        const local = new Set<string>()
+        const local = new Map<string, Collected>()
         for (const raw of raws) {
           const key = `${raw.channel}:${raw.ts}`
           if (SKIP_SUBTYPES.has(raw.subtype ?? '') || raw.bot_id || !raw.channel) continue
-          if (seen.has(key) || local.has(key) || this.state.msgIndex[key]) continue
-          local.add(key)
-          built.push({ msg: await this.toMsg(raw as RawMsg & { channel: string }), source })
+          const earlier = seen.get(key)
+          // Mentions are read before DMs: a DM read of the same message decides that it is a DM item.
+          if (earlier?.source === 'mention' && (source === 'im' || source === 'mpim')) earlier.source = source
+          if (earlier || local.has(key) || this.state.msgIndex[key]) continue
+          const c: Collected = { msg: await this.toMsg(raw as RawMsg & { channel: string }), source: source === 'mention' && raw.dm ? raw.dm : source }
+          local.set(key, c)
+          built.push(c)
         }
-        for (const k of local) seen.add(k)
+        for (const [k, c] of local) seen.set(k, c)
         out.push(...built)
         Object.assign(cursorUpdates, cursors)
         removeCursors.push(...(remove ?? []))
@@ -94,11 +98,7 @@ export class Collector {
       }
     }
 
-    const sweep = tickNo % DM_SWEEP_EVERY === 0
-    for (const dm of await this.listDms()) {
-      if (!sweep && !this.recentlyActive(`hist:${dm.id}`, now)) continue
-      await run(`${dm.type} ${dm.id}`, dm.type, () => this.readHistory(dm.id, nowTs))
-    }
+    // Fixed-cost sources first: however many DMs there are, they cannot starve mentions, channels or follow-ups.
     await run('mentions', 'mention', () => this.readMentions(nowTs))
     for (const channel of this.cfg.watchChannels) {
       await run(`channel ${channel}`, 'channel', () => this.readChannel(channel, nowTs, now))
@@ -108,6 +108,27 @@ export class Collector {
       const [channel, threadTs] = [key.slice(0, i), key.slice(i + 1)]
       if (this.cfg.watchChannels.includes(channel)) continue // readChannel tracks it through its thr: cursor
       await run(`thread ${key}`, 'followup', () => this.readThread(channel, threadTs, nowTs))
+    }
+
+    const dms = this.exhausted ? [] : await this.listDms()
+    const readDm = (dm: { id: string; type: 'im' | 'mpim' }) => run(`${dm.type} ${dm.id}`, dm.type, () => this.readDm(dm.id, nowTs))
+    const quiet: typeof dms = []
+    for (const dm of dms) {
+      if (this.state.cursors[`hist:${dm.id}`] && !this.recentlyActive(dm.id, now)) quiet.push(dm)
+      else await readDm(dm) // active, or new (a new DM on the very first run costs no request)
+    }
+    // Quiet DMs: a round-robin sweep every DM_SWEEP_EVERY ticks; one cut short by the budget resumes next tick
+    // after the last DM it read, so no DM is starved by those listed before it.
+    const after = this.state.dmSweepAfter
+    if (after !== undefined || tickNo % DM_SWEEP_EVERY === 0) {
+      const todo = quiet.sort((a, b) => (a.id < b.id ? -1 : 1)).filter((dm) => after === undefined || dm.id > after)
+      let finished = true
+      for (const dm of todo) {
+        await readDm(dm)
+        if (this.exhausted) { finished = false; break }
+        this.state.dmSweepAfter = dm.id
+      }
+      if (finished) this.state.dmSweepAfter = undefined
     }
 
     if (this.exhausted) process.stderr.write(`ping-assistant: slack request budget exhausted, ${deferred} source(s) deferred to the next tick\n`)
@@ -139,10 +160,17 @@ export class Collector {
     }
   }
 
-  /** A DM without a cursor is new (read now); otherwise its cursor is the last message seen in it. */
-  private recentlyActive(key: string, now: number): boolean {
-    const cursor = this.state.cursors[key]
-    return !cursor || Number(cursor.split('.')[0]) * 1000 >= now - DAY_MS
+  /** Active: a message was actually read from it in the last 24h (a first-run cursor stamp is not activity). */
+  private recentlyActive(id: string, now: number): boolean {
+    const last = this.state.dmActivity?.[id]
+    return last !== undefined && Number(last.split('.')[0]) * 1000 >= now - DAY_MS
+  }
+
+  private async readDm(id: string, nowTs: string): Promise<Read> {
+    const read = await this.readHistory(id, nowTs)
+    const newest = maxTs(undefined, ...read.raws.map((m) => m.ts))
+    if (newest) (this.state.dmActivity ??= {})[id] = maxTs(this.state.dmActivity?.[id], newest)!
+    return read
   }
 
   private withChannel(raws: RawMsg[], channel: string): RawMsg[] {

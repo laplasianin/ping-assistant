@@ -3,7 +3,8 @@ import { writeFileSync } from 'node:fs'
 export type RawMsg = {
   ts: string; thread_ts?: string; user?: string; bot_id?: string; subtype?: string; text: string;
   files?: { id: string; name: string; url_private_download?: string }[];
-  channel?: string; permalink?: string; reply_count?: number; latest_reply?: string
+  channel?: string; permalink?: string; reply_count?: number; latest_reply?: string;
+  dm?: 'im' | 'mpim' // search hits only: the match is in a DM, so it is a DM item, not a channel mention
 }
 
 type SlackResponse = Record<string, any> & { ok: boolean; error?: string; response_metadata?: { next_cursor?: string } }
@@ -133,10 +134,12 @@ export class SlackClient {
     let pages = 1
     do {
       const res = await this.get('search.messages', { query: `<@${userId}> after:${afterDate}`, sort: 'timestamp', sort_dir: 'asc', count: 100, page })
-      for (const m of (res.messages?.matches ?? []) as (Omit<RawMsg, 'channel'> & { channel?: { id: string } | string })[]) {
+      for (const m of (res.messages?.matches ?? []) as (Omit<RawMsg, 'channel'> & { channel?: { id: string; is_im?: boolean; is_mpim?: boolean } | string })[]) {
         if (m.user === userId) continue
         const threadTs = m.thread_ts ?? threadFromPermalink(m.permalink)
-        out.push({ ...m, channel: typeof m.channel === 'string' ? m.channel : m.channel?.id, ...(threadTs ? { thread_ts: threadTs } : {}) })
+        const ch = typeof m.channel === 'string' ? { id: m.channel } : m.channel
+        const dm = ch?.is_im ? 'im' : ch?.is_mpim ? 'mpim' : undefined
+        out.push({ ...m, channel: ch?.id, ...(threadTs ? { thread_ts: threadTs } : {}), ...(dm ? { dm } : {}) })
       }
       pages = res.messages?.paging?.pages ?? 1
       page++

@@ -864,3 +864,28 @@ test('a top-level IM item is answered as a plain message: no thread, no watch', 
   expect(e.state.watchedThreads).toEqual({})
   expect(Object.keys(e.state.cursors).filter((k) => k.startsWith('thr:'))).toEqual([])
 })
+
+test('our own send for one item in a thread does not close a sibling item as answered manually', async () => {
+  const e = await setup()
+  e.collector.queue.push({ msg: threadMsg('105.000000', 'Вопрос A', 'U2'), source: 'channel' })
+  e.collector.queue.push({ msg: threadMsg('106.000000', 'Вопрос B', 'U3'), source: 'channel' })
+  await e.orch.tick()
+  e.advance(91_000)
+  await e.orch.tick()
+  const show = async (id: string, v: string) => {
+    expect((await e.client.callTool({ name: 'propose', arguments: { item_id: id, analysis: 'x', variants: [v], mode: 'variants' } })).isError).toBeFalsy()
+    return e.api.last()
+  }
+  const a = await show('1', 'Ответ A')
+  const b = await show('2', 'Ответ B')
+  e.slack.repl['C1:100.000000'] = []
+  await e.callback('pa:choose:1:1', a.id)
+  expect(e.state.items['1']!.status).toBe('sent')
+  // Slack now shows our reply (posted with Ilya's token) in the thread.
+  e.slack.repl['C1:100.000000'] = [{ ts: '9000.000100', thread_ts: '100.000000', user: 'ME', text: 'Ответ A' }]
+
+  await e.callback('pa:choose:2:1', b.id)
+  expect(e.state.items['2']!.status).toBe('sent')
+  expect(e.slack.posted.map((p) => p.text)).toEqual(['Ответ A', 'Ответ B'])
+  expect(e.api.sent.some((s) => s.text.includes('ты уже ответил'))).toBe(false)
+})
