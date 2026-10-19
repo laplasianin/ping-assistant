@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 export type SlackMsg = { channel: string; ts: string; threadTs?: string; user: string; userName?: string; text: string; files?: { id: string; name: string; path?: string }[]; permalink?: string }
@@ -35,9 +35,15 @@ export class StateStore {
   }
 
   save(state: State): void {
-    mkdirSync(dirname(this.path), { recursive: true })
+    mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 })
     const tmp = `${this.path}.tmp`
-    writeFileSync(tmp, JSON.stringify(state, null, 2))
-    renameSync(tmp, this.path)
+    try {
+      writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 })
+      chmodSync(tmp, 0o600) // mode is ignored if a stale tmp file already existed
+      renameSync(tmp, this.path)
+    } catch (err) {
+      try { unlinkSync(tmp) } catch {}
+      throw err
+    }
   }
 }

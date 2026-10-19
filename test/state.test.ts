@@ -1,5 +1,5 @@
 import { test, expect, afterEach } from 'bun:test'
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { emptyState, StateStore, type Item } from '../src/state'
@@ -44,4 +44,25 @@ test('save is atomic: no .tmp left behind, file parses', () => {
   new StateStore(path).save(emptyState())
   expect(readdirSync(dir)).toEqual(['state.json'])
   expect(JSON.parse(readFileSync(path, 'utf8')).nextSeq).toBe(1)
+})
+
+test('save creates state file 0600 and new directory 0700, tightening an existing wide file', () => {
+  const dir = tmp()
+  const sub = join(dir, 'nested')
+  const path = join(sub, 'state.json')
+  const store = new StateStore(path)
+  store.save(emptyState())
+  expect(statSync(sub).mode & 0o777).toBe(0o700)
+  expect(statSync(path).mode & 0o777).toBe(0o600)
+  chmodSync(path, 0o644)
+  store.save(emptyState())
+  expect(statSync(path).mode & 0o777).toBe(0o600)
+})
+
+test('failed save leaves no .tmp file behind', () => {
+  const dir = tmp()
+  const path = join(dir, 'state.json')
+  mkdirSync(path) // renameSync of a file onto a directory throws
+  expect(() => new StateStore(path).save(emptyState())).toThrow()
+  expect(readdirSync(dir)).toEqual(['state.json'])
 })
