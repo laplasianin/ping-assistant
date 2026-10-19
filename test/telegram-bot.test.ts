@@ -1,4 +1,7 @@
 import { test, expect } from 'bun:test'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { GrammyError } from 'grammy'
 import { TelegramBot, isOurProcess, type Inbound, type PollingHooks, type TelegramApi } from '../src/telegram/bot'
 
@@ -28,12 +31,15 @@ class FakeApi implements TelegramApi {
   }
 }
 
-function setup(hooks?: PollingHooks) {
+// Silent by default: polling/409 diagnostics must not leak into test output; the pid file lives in a temp dir.
+function setup(hooks: PollingHooks = {}) {
   const api = new FakeApi()
-  const bot = new TelegramBot('123:fake', CHAT, api, hooks)
+  const pidFile = join(mkdtempSync(join(tmpdir(), 'ping-assistant-pid-')), 'bot.pid')
+  const logs: string[] = []
+  const bot = new TelegramBot('123:fake', CHAT, api, { pidFile, log: (k) => { logs.push(k) }, ...hooks })
   const inbound: Inbound[] = []
   bot.onInbound(async (i) => { inbound.push(i) })
-  return { api, bot, inbound }
+  return { api, bot, inbound, pidFile, logs }
 }
 
 const textUpdate = (id: number, chatId: number, fromId: number, text: string, replyTo?: number) => ({
@@ -189,4 +195,32 @@ test('stop() during backoff prevents another start', async () => {
   await bot.stop()
   await loop
   expect(calls).toBe(1)
+})
+
+test('stop() removes our own bot.pid even when polling never started', async () => {
+  const { bot, pidFile } = setup()
+  writeFileSync(pidFile, String(process.pid))
+  await bot.stop()
+  expect(existsSync(pidFile)).toBe(false)
+})
+
+test('stop() removes our own bot.pid even when bot.stop() throws', async () => {
+  const { bot, pidFile } = setup()
+  writeFileSync(pidFile, String(process.pid))
+  ;(bot as unknown as { bot: { stop: () => Promise<void> } }).bot.stop = async () => { throw new Error('boom') }
+  await expect(bot.stop()).rejects.toThrow('boom')
+  expect(existsSync(pidFile)).toBe(false)
+})
+
+test('stop() leaves a pid file that belongs to another process', async () => {
+  const { bot, pidFile } = setup()
+  writeFileSync(pidFile, String(process.pid + 1))
+  await bot.stop()
+  expect(readFileSync(pidFile, 'utf8')).toBe(String(process.pid + 1))
+})
+
+test('polling diagnostics go to the injected logger', async () => {
+  const { bot, logs } = setup({ startPolling: async (onStart) => { onStart() }, sleep: async () => {} })
+  await bot.poll()
+  expect(logs).toEqual(['polling'])
 })

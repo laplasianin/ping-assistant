@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { Bot, GrammyError } from 'grammy'
 import type { Update, UserFromGetMe } from 'grammy/types'
 import { parseCallback, parseText, type Command } from '../commands'
@@ -17,8 +17,7 @@ export interface TelegramApi {
   answerCallbackQuery(id: string, opts?: Opts): Promise<unknown>
 }
 
-const STATE_DIR = join(homedir(), '.config', 'ping-assistant')
-const PID_FILE = join(STATE_DIR, 'bot.pid')
+const DEFAULT_PID_FILE = join(homedir(), '.config', 'ping-assistant', 'bot.pid')
 const HELP = 'Ping Assistant: отвечай на вопросы из Slack кнопками или текстом («14 1», «14: свой текст», «14 пропустить»).'
 
 const STABLE_MS = 60_000
@@ -27,13 +26,15 @@ const MAX_CONFLICTS = 8
 export type PollingHooks = {
   startPolling?: (onStart: () => void) => Promise<void>
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>
+  pidFile?: string
+  log?: (kind: string) => void
 }
 
 const markup = (kb: Keyboard) => ({
   inline_keyboard: kb.map((row) => row.map((b) => ({ text: b.label, callback_data: b.data }))),
 })
 
-const log = (kind: string) => process.stderr.write(`telegram: ${kind}\n`)
+const defaultLog = (kind: string): void => { process.stderr.write(`telegram: ${kind}\n`) }
 
 export class TelegramBot {
   private readonly bot: Bot
@@ -44,6 +45,8 @@ export class TelegramBot {
   private abort: AbortController | undefined
   private readonly startPolling: (onStart: () => void) => Promise<void>
   private readonly sleep: (ms: number, signal: AbortSignal) => Promise<void>
+  private readonly pidFile: string
+  private readonly log: (kind: string) => void
 
   constructor(token: string, private readonly chatId: string, api?: TelegramApi, hooks: PollingHooks = {}) {
     // With an injected api no network is needed: give grammY fake botInfo so handleUpdate works without init.
@@ -52,6 +55,8 @@ export class TelegramBot {
     this.api = api ?? (this.bot.api as unknown as TelegramApi)
     this.startPolling = hooks.startPolling ?? ((onStart) => this.bot.start({ onStart }))
     this.sleep = hooks.sleep ?? abortableSleep
+    this.pidFile = hooks.pidFile ?? DEFAULT_PID_FILE
+    this.log = hooks.log ?? defaultLog
     this.wire()
   }
 
@@ -121,13 +126,13 @@ export class TelegramBot {
       try {
         await this.api.answerCallbackQuery(q.id)
       } catch (err) {
-        log(`answerCallbackQuery failed: ${err instanceof Error ? err.name : 'unknown'}`) // stale query must not drop the command
+        this.log(`answerCallbackQuery failed: ${err instanceof Error ? err.name : 'unknown'}`) // stale query must not drop the command
       }
       if (!cmd || !q.message) return
       await this.handler({ cmd, messageId: q.message.message_id })
     })
 
-    this.bot.catch((err) => log(`handler error (polling continues): ${err.error instanceof Error ? err.error.name : 'unknown'}`))
+    this.bot.catch((err) => this.log(`handler error (polling continues): ${err.error instanceof Error ? err.error.name : 'unknown'}`))
   }
 
   async start(): Promise<void> {
@@ -150,7 +155,7 @@ export class TelegramBot {
             // onStart fires before the first getUpdates, so a 409 can still follow: only forgive after a quiet period.
             stable = setTimeout(() => { failures = 0; conflicts = 0 }, STABLE_MS)
             stable.unref?.()
-            log('polling')
+            this.log('polling')
           })
           return
         } catch (err) {
@@ -159,11 +164,11 @@ export class TelegramBot {
           failures++
           const is409 = err instanceof GrammyError && err.error_code === 409
           if (is409 && ++conflicts >= MAX_CONFLICTS) {
-            log('409 Conflict persists, another poller holds the token; giving up')
+            this.log('409 Conflict persists, another poller holds the token; giving up')
             return
           }
           const delay = Math.min(1000 * failures, 15_000)
-          log(`${is409 ? '409 Conflict' : 'polling error'}, retrying in ${delay / 1000}s`)
+          this.log(`${is409 ? '409 Conflict' : 'polling error'}, retrying in ${delay / 1000}s`)
           await this.sleep(delay, signal)
         }
       }
@@ -175,27 +180,30 @@ export class TelegramBot {
   async stop(): Promise<void> {
     this.stopping = true
     this.abort?.abort()
-    await this.bot.stop()
     try {
-      if (parseInt(readFileSync(PID_FILE, 'utf8'), 10) === process.pid) rmSync(PID_FILE)
-    } catch {}
+      await this.bot.stop()
+    } finally {
+      try {
+        if (parseInt(readFileSync(this.pidFile, 'utf8'), 10) === process.pid) rmSync(this.pidFile)
+      } catch {}
+    }
   }
 
   // Telegram allows one getUpdates consumer per token; an orphaned previous run would cause 409 forever.
   private claimPidFile(): void {
-    mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
+    mkdirSync(dirname(this.pidFile), { recursive: true, mode: 0o700 })
     try {
-      const stale = parseInt(readFileSync(PID_FILE, 'utf8'), 10)
+      const stale = parseInt(readFileSync(this.pidFile, 'utf8'), 10)
       if (stale > 1 && stale !== process.pid) {
         process.kill(stale, 0)
         const cmd = execFileSync('ps', ['-p', String(stale), '-o', 'args='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
         if (isOurProcess(cmd, entryPath())) {
-          log(`replacing stale poller pid=${stale}`)
+          this.log(`replacing stale poller pid=${stale}`)
           process.kill(stale, 'SIGTERM')
         }
       }
     } catch {}
-    writeFileSync(PID_FILE, String(process.pid))
+    writeFileSync(this.pidFile, String(process.pid))
   }
 }
 
