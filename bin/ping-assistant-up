@@ -2,7 +2,7 @@
 # --setting-sources project: only .claude/settings.json applies, so user-level allow rules
 #   (e.g. Bash(python:*), Bash(curl:*)) cannot reopen a path to Slack or to the token file.
 # --permission-mode dontAsk: anything not pre-approved there is denied instead of prompting.
-# --dangerously-load-development-channels ping-assistant: the server from this repo's .mcp.json
+# --dangerously-load-development-channels server:ping-assistant: the server from this repo's .mcp.json
 #   becomes a channel. A `plugin:…@local` channel would need the plugin *installed* (a
 #   --plugin-dir load does not count), so the project-level MCP server is used instead.
 cd "$(dirname "$0")/.." && exec caffeinate -i claude \

@@ -89,7 +89,7 @@ cp ping-assistant.config.example.json ping-assistant.config.json
 bin/ping-assistant-up
 ```
 
-Это `caffeinate -i claude --setting-sources project --permission-mode dontAsk --dangerously-load-development-channels ping-assistant`,
+Это `caffeinate -i claude --setting-sources project --permission-mode dontAsk --dangerously-load-development-channels server:ping-assistant`,
 запущенный из корня проекта; дополнительные аргументы пробрасываются в `claude`. Сервер объявлен
 в `.mcp.json` проекта (`enableAllProjectMcpServers: true` в настройках проекта снимает вопрос об
 одобрении), а флаг `--dangerously-load-development-channels` делает его каналом. Путь через
@@ -224,7 +224,7 @@ Slack читается по-настоящему, отправки нет.
   plugin:<name>@<marketplace>»); `plugin:ping-assistant@local` с `--plugin-dir .` принимается
   синтаксически, но канал не активируется: «plugin not installed» и «not on the approved channels
   allowlist». Рабочий путь — сервер из `.mcp.json` плюс
-  `--dangerously-load-development-channels ping-assistant` (см. «Запуск»).
+  `--dangerously-load-development-channels server:ping-assistant` (см. «Запуск»).
 - Имя инструмента: `mcp__ping-assistant__<tool>` (для плагинного пути было бы
   `mcp__plugin_ping-assistant_ping-assistant__<tool>`). Без allow-правила вызов упирается в
   запрос разрешения; нужные правила лежат в `.claude/settings.json`.
