@@ -16,10 +16,14 @@ export type OrchestratorDeps = {
   cfg: Config; store: Pick<StateStore, 'save'>; state: State; slack: SlackClient;
   collector: Pick<Collector, 'tick'> & Partial<Pick<Collector, 'socketConnected' | 'socketEpoch'>>; tg: TelegramBot; channel: Pick<Channel, 'notify'>; now?: () => number
   /** Socket Mode: ticks every drainSeconds and mostly drain the socket queue; polling reconciles every socketReconcileTicks. */
-  socket?: Pick<SlackSocket, 'isConnected' | 'epoch'>
+  socket?: Pick<SlackSocket, 'isConnected' | 'epoch' | 'reconnect' | 'lastFrameAt'>
 }
 
 const CLOSED: ItemStatus[] = ['sent', 'skipped', 'answered_manually']
+/** No frame of any kind for this long: the connection is presumed half-open and is replaced. */
+const SOCKET_SILENCE_MS = 10 * 60_000
+/** A tick that changed nothing saves at most this often. */
+const IDLE_SAVE_MS = 60_000
 const DAY_MS = 86_400_000
 
 const log = (kind: string): void => { process.stderr.write(`ping-assistant: ${kind}\n`) }
@@ -30,6 +34,8 @@ export class Orchestrator {
   private timer: ReturnType<typeof setInterval> | undefined
   private ticking: Promise<void> | undefined
   private readonly msgs: ItemMessages
+  private lastTickEnd: number | undefined
+  private lastSave: number | undefined
 
   constructor(private readonly d: OrchestratorDeps) {
     this.now = d.now ?? Date.now
@@ -70,13 +76,16 @@ export class Orchestrator {
 
   private async runTick(): Promise<void> {
     const { state, cfg, collector } = this.d
+    let dirty = false
     try {
       const now = this.now()
       if (this.d.socket) {
+        this.checkSocket(this.d.socket, now)
         collector.socketConnected = this.d.socket.isConnected() // down: poll every tick
         collector.socketEpoch = this.d.socket.epoch() // a reconnect since the last tick: poll, trust no cursor
       }
       const batch = await collector.tick(now)
+      dirty = batch.collected.length > 0 || batch.removeCursors.length > 0
       for (const { msg, source } of batch.collected) {
         const ev = ingest(state, msg, source, now, cfg)
         if (ev.kind === 'dropped') continue
@@ -89,14 +98,30 @@ export class Orchestrator {
         })
       }
       // Only now: every collected message is in msgIndex, so a restart from these cursors loses nothing.
-      applyCursors(state, batch)
-      for (const item of mature(state, now, cfg)) await this.deliver(item)
-      await this.triageWatchdog(now)
+      if (applyCursors(state, batch)) dirty = true
+      const ripe = mature(state, now, cfg)
+      if (ripe.length) dirty = true
+      for (const item of ripe) await this.deliver(item)
+      if (await this.triageWatchdog(now)) dirty = true
     } catch (err) {
+      dirty = true
       log(`tick failed: ${errName(err)}`)
     } finally {
-      this.save()
+      // Socket mode ticks every few seconds and most drain nothing: an unchanged state is not rewritten each time.
+      if (dirty || this.lastSave === undefined || this.now() - this.lastSave >= IDLE_SAVE_MS) this.save()
+      this.lastTickEnd = this.now()
     }
+  }
+
+  /**
+   * After sleep or a network change the WebSocket can stay half-open without a close event: a wall-clock gap
+   * between ticks, or a connection that has been silent for 10 minutes, replaces it.
+   */
+  private checkSocket(socket: NonNullable<OrchestratorDeps['socket']>, now: number): void {
+    const gap = this.lastTickEnd !== undefined && now - this.lastTickEnd > 2 * this.d.cfg.drainSeconds * 1000
+    const frame = socket.lastFrameAt()
+    if (gap) socket.reconnect('clock gap')
+    else if (frame !== undefined && now - frame > SOCKET_SILENCE_MS) socket.reconnect('silent 10 min')
   }
 
   async handle(i: Inbound): Promise<void> {
@@ -363,12 +388,15 @@ export class Orchestrator {
   }
 
   /** Items the session has not answered for triageTimeoutSeconds: remind Ilya once and nudge the session again. */
-  private async triageWatchdog(now: number): Promise<void> {
+  /** Returns whether it reminded about any item. */
+  private async triageWatchdog(now: number): Promise<boolean> {
     const { cfg, tg } = this.d
+    let acted = false
     for (const item of this.sorted()) {
       if (item.status !== 'triage' || item.telegram.triageAlerted) continue
       const since = item.triageAt ?? item.createdAt
       if (now - since < cfg.triageTimeoutSeconds * 1000) continue
+      acted = true
       await this.safely('triage watchdog', async () => {
         const text = `⏳ #${item.id} без разбора уже ${Math.floor((now - since) / 60_000)} мин`
         const id = await tg.send(text, [[{ label: 'Пропустить', data: callbackData({ kind: 'skip', itemId: item.id }) }]])
@@ -378,6 +406,7 @@ export class Orchestrator {
         await this.d.channel.notify(JSON.stringify(itemJson(item)), { kind: 'item', item_id: item.id })
       })
     }
+    return acted
   }
 
   private async deliver(item: Item): Promise<void> {
@@ -436,6 +465,7 @@ export class Orchestrator {
   }
 
   private save(): void {
+    this.lastSave = this.now()
     try { this.d.store.save(this.d.state) } catch (err) { log(`state save failed: ${errName(err)}`) }
   }
 }

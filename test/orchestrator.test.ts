@@ -95,7 +95,7 @@ afterEach(() => { env?.orch.stop(); stderr.mockRestore() })
 async function setup(
   cfgOverrides: Partial<Config> = {}, state: State = emptyState(),
   realCollector?: (slack: FakeSlack, cfg: Config) => Collector,
-  socket?: { isConnected(): boolean; epoch(): number },
+  socket?: { isConnected(): boolean; epoch(): number; reconnect(reason: string): void; lastFrameAt(): number | undefined },
 ) {
   const cfg = { ...baseCfg, ...cfgOverrides }
   const slack = new FakeSlack()
@@ -934,7 +934,7 @@ test('socket mode: an enqueued DM becomes an item and, after the settle window, 
   const ts = (sec: number) => `${T0 / 1000 + sec}.000000`
   const state = emptyState()
   let collector!: Collector
-  const sock = { up: true, isConnected() { return this.up }, epoch: () => 1 }
+  const sock = { up: true, isConnected() { return this.up }, epoch: () => 1, reconnect() {}, lastFrameAt: () => undefined }
   const intervals: number[] = []
   const spy = spyOn(globalThis, 'setInterval').mockImplementation(((fn: () => void, ms: number) => { intervals.push(ms); return 0 as never }) as never)
   let e: Awaited<ReturnType<typeof setup>>
@@ -968,7 +968,7 @@ test('socket mode: a reconcile poll replaying an own socket message does not clo
   const ts = (sec: number) => `${T0 / 1000 + sec}.000000`
   const state = emptyState()
   let collector!: Collector
-  const sock = { isConnected: () => true, epoch: () => 1 }
+  const sock = { isConnected: () => true, epoch: () => 1, reconnect() {}, lastFrameAt: () => undefined }
   const e = await setup({ socketReconcileTicks: 3 }, state, (slack, cfg) => (collector = new Collector(slack as never, cfg, state, '/tmp/ping-assistant-test/files')), sock)
   await e.orch.tick() // connect tick: polls, first-run cursors; D7 is not listed yet, so it has no hist: cursor
   const own = { ts: ts(1), user: 'ME', text: 'привет' }
@@ -988,4 +988,56 @@ test('socket mode: a reconcile poll replaying an own socket message does not clo
   await e.orch.tick()
   expect(e.state.items['1']!.status).toBe('settling')
   expect(Object.keys(e.state.items)).toEqual(['1'])
+})
+
+function fakeSocket() {
+  return {
+    reasons: [] as string[], frameAt: undefined as number | undefined,
+    isConnected: () => true, epoch: () => 1,
+    reconnect(reason: string) { this.reasons.push(reason) },
+    lastFrameAt() { return this.frameAt },
+  }
+}
+
+test('socket mode: a wall-clock gap of more than 2×drainSeconds between ticks reconnects the socket', async () => {
+  const sock = fakeSocket()
+  const e = await setup({}, emptyState(), undefined, sock)
+  await e.orch.tick()
+  e.advance(5_000)
+  await e.orch.tick()
+  e.advance(10_000) // exactly 2×drainSeconds: still fine
+  await e.orch.tick()
+  expect(sock.reasons).toEqual([])
+  e.advance(10_001) // the Mac slept
+  await e.orch.tick()
+  expect(sock.reasons).toEqual(['clock gap'])
+})
+
+test('socket mode: a connection without any frame for 10 minutes is replaced', async () => {
+  const sock = fakeSocket()
+  const e = await setup({}, emptyState(), undefined, sock)
+  sock.frameAt = T0 - 600_000
+  await e.orch.tick()
+  expect(sock.reasons).toEqual([])
+  e.advance(5_000)
+  await e.orch.tick()
+  expect(sock.reasons).toEqual(['silent 10 min'])
+})
+
+test('a tick that changes nothing does not save; changes save at once; idle ticks save at most once a minute', async () => {
+  const e = await setup()
+  await e.orch.tick() // the first tick always saves
+  const base = e.saves()
+  for (let i = 0; i < 5; i++) { e.advance(5_000); await e.orch.tick() }
+  expect(e.saves()).toBe(base)
+  e.collector.queue.push({ msg: { channel: 'D1', ts: '200.000000', user: 'U2', text: 'hi' }, source: 'im' })
+  e.advance(5_000)
+  await e.orch.tick()
+  expect(e.saves()).toBe(base + 1)
+  e.advance(59_000)
+  await e.orch.tick()
+  expect(e.saves()).toBe(base + 1)
+  e.advance(1_000)
+  await e.orch.tick()
+  expect(e.saves()).toBe(base + 2)
 })

@@ -46,13 +46,18 @@ type Read = { raws: RawMsg[]; cursors: Record<string, string>; remove?: string[]
 /** One tick's DM search: the DMs to read now, and the floor to commit once they are read. */
 type Discovery = { active: Set<string>; floor: string }
 
-/** Commits a tick's cursors; a cursor never moves backwards (the orchestrator may have advanced it meanwhile). */
-export function applyCursors(state: State, r: Pick<TickResult, 'cursorUpdates' | 'removeCursors'>): void {
-  for (const k of r.removeCursors) delete state.cursors[k]
+/**
+ * Commits a tick's cursors; a cursor never moves backwards (the orchestrator may have advanced it meanwhile).
+ * Returns whether any cursor changed.
+ */
+export function applyCursors(state: State, r: Pick<TickResult, 'cursorUpdates' | 'removeCursors'>): boolean {
+  let changed = false
+  for (const k of r.removeCursors) if (k in state.cursors) { delete state.cursors[k]; changed = true }
   for (const [k, v] of Object.entries(r.cursorUpdates)) {
     const cur = state.cursors[k]
-    if (!cur || cmpTs(v, cur) > 0) state.cursors[k] = v
+    if (!cur || cmpTs(v, cur) > 0) { state.cursors[k] = v; changed = true }
   }
+  return changed
 }
 
 export class Collector {
