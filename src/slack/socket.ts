@@ -15,6 +15,10 @@ export type WebSocketLike = {
   onmessage: ((ev: { data: unknown }) => void) | null
   onclose: ((ev: { code?: number }) => void) | null
   onerror: ((ev: any) => void) | null
+  /** Optional (Bun's client WebSocket has them): protocol-level ping and its pong/ping events. */
+  ping?: () => void
+  addEventListener?: (type: string, fn: (ev: any) => void) => void
+  removeEventListener?: (type: string, fn: (ev: any) => void) => void
 }
 
 export type SlackSocketOptions = {
@@ -24,12 +28,15 @@ export type SlackSocketOptions = {
   sleep?: (ms: number) => Promise<void>
   log?: (line: string) => void
   now?: () => number
+  /** How often to ping() a WebSocket that supports it (60s). */
+  pingIntervalMs?: number
 }
 
 const OPEN_URL = 'https://slack.com/api/apps.connections.open'
 const MIN_BACKOFF_MS = 1000
 const MAX_BACKOFF_MS = 15_000
 const OPEN_TIMEOUT_MS = 30_000
+const PING_INTERVAL_MS = 60_000
 const CHANNEL_TYPES = new Set<string>(['im', 'mpim', 'channel', 'group'])
 /** apps.connections.open errors that retrying cannot fix: log once, stop, keep polling. */
 const FATAL_OPEN_ERRORS = new Set(['invalid_auth', 'not_allowed_token_type', 'token_revoked', 'account_inactive', 'missing_scope'])
@@ -63,6 +70,7 @@ export class SlackSocket {
   private readonly log: (line: string) => void
   private readonly now: () => number
   private stopped = true
+  private gaveUpFlag = false
   private connected = false
   private epochNo = 0
   private lastFrame: number | undefined
@@ -90,6 +98,11 @@ export class SlackSocket {
   /** When the current connection last received a frame of any kind (undefined while not connected). */
   lastFrameAt(): number | undefined {
     return this.connected ? this.lastFrame : undefined
+  }
+
+  /** A fatal open error stopped the socket for good: only polling is left. */
+  gaveUp(): boolean {
+    return this.gaveUpFlag
   }
 
   start(): void {
@@ -129,6 +142,7 @@ export class SlackSocket {
         if (FATAL_OPEN_ERRORS.has(name)) {
           this.log(`socket: open failed (${name}), giving up: polling only`)
           this.stopped = true
+          this.gaveUpFlag = true
           break
         }
         this.log(`socket: open failed (${name})`)
@@ -173,12 +187,28 @@ export class SlackSocket {
         if (done) return
         done = true
         if (final) outcome = final
+        // A replaced or closed socket must not ack, refresh liveness or deliver anything any more.
+        ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null
+        if (pinger !== undefined) clearInterval(pinger)
+        if (pingable) for (const type of ['pong', 'ping']) ws.removeEventListener?.(type, onPong)
         this.connected = false
         this.ws = undefined
         this.endSession = undefined
         resolve(outcome)
       }
       this.endSession = end
+      // Feature-detected liveness: a pong (or Slack's own ping) proves the connection is not half-open.
+      const onPong = (): void => { if (!done) this.lastFrame = this.now() }
+      const pingable = typeof ws.ping === 'function' && typeof ws.addEventListener === 'function'
+      let pinger: ReturnType<typeof setInterval> | undefined
+      if (pingable) {
+        for (const type of ['pong', 'ping']) ws.addEventListener!(type, onPong)
+        pinger = setInterval(() => {
+          if (!this.connected || this.ws !== ws) return
+          try { ws.ping!() } catch {}
+        }, this.opts.pingIntervalMs ?? PING_INTERVAL_MS)
+        pinger.unref?.()
+      }
       const onFrame = (data: unknown): void => {
         this.lastFrame = this.now()
         let msg: Record<string, any>

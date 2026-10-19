@@ -313,3 +313,126 @@ test('hidden message events (edits, message_replied) are acked and not delivered
   expect(s.events).toEqual([])
   s.socket.stop()
 })
+
+test('gaveUp() is false while retrying and true after a fatal open error', async () => {
+  let calls = 0
+  const socket = new SlackSocket('xapp-bad', {
+    onEvent: () => {},
+    fetchImpl: (async () => { calls++; return new Response(JSON.stringify({ ok: false, error: calls === 1 ? 'ratelimited' : 'token_revoked' })) }) as unknown as typeof fetch,
+    wsFactory: () => { throw new Error('must not connect') },
+    sleep: async () => {}, log: () => {},
+  })
+  expect(socket.gaveUp()).toBe(false)
+  socket.start()
+  await flush()
+  expect(calls).toBe(2)
+  expect(socket.gaveUp()).toBe(true)
+})
+
+test('a replaced socket is detached: its late frames neither ack, nor deliver, nor count as liveness', async () => {
+  let clock = 1000
+  const s = (() => {
+    const sockets: FakeWs[] = []
+    const events: SocketEvent[] = []
+    const socket = new SlackSocket('xapp', {
+      onEvent: (raw) => events.push(raw),
+      fetchImpl: (async () => new Response(JSON.stringify({ ok: true, url: 'wss://x' }))) as unknown as typeof fetch,
+      wsFactory: (url) => { const ws = new FakeWs(url, []); sockets.push(ws); return ws },
+      sleep: async () => {}, log: () => {}, now: () => clock,
+    })
+    return { socket, sockets, events }
+  })()
+  s.socket.start()
+  await flush()
+  const first = s.sockets[0]!
+  first.emit({ type: 'hello' })
+  s.socket.reconnect('stale')
+  await flush()
+  expect(first.onopen).toBeNull()
+  expect(first.onmessage).toBeNull()
+  expect(first.onclose).toBeNull()
+  expect(first.onerror).toBeNull()
+  const second = s.sockets[1]!
+  second.emit({ type: 'hello' })
+  expect(s.socket.lastFrameAt()).toBe(1000)
+  clock = 9000
+  first.emit({ envelope_id: 'late', type: 'events_api', payload: { event: { type: 'message', channel: 'D1', channel_type: 'im', ts: '1.0', text: '' } } })
+  expect(first.sent).toEqual([])
+  expect(s.events).toEqual([])
+  expect(s.socket.lastFrameAt()).toBe(1000)
+  expect(s.socket.isConnected()).toBe(true)
+  s.socket.stop()
+  expect(second.onmessage).toBeNull()
+})
+
+class PingWs extends FakeWs {
+  pings = 0
+  listeners: Record<string, ((ev: unknown) => void)[]> = {}
+  ping() { this.pings++ }
+  addEventListener(type: string, fn: (ev: unknown) => void) { (this.listeners[type] ??= []).push(fn) }
+  removeEventListener(type: string, fn: (ev: unknown) => void) { this.listeners[type] = (this.listeners[type] ?? []).filter((f) => f !== fn) }
+  fire(type: string) { for (const fn of this.listeners[type] ?? []) fn({}) }
+}
+
+function pingSetup(make: (url: string) => FakeWs) {
+  let clock = 1000
+  const sockets: FakeWs[] = []
+  const socket = new SlackSocket('xapp', {
+    onEvent: () => {},
+    fetchImpl: (async () => new Response(JSON.stringify({ ok: true, url: 'wss://x' }))) as unknown as typeof fetch,
+    wsFactory: (url) => { const ws = make(url); sockets.push(ws); return ws },
+    sleep: async () => {}, log: () => {}, now: () => clock, pingIntervalMs: 5,
+  })
+  return { socket, sockets, setClock: (t: number) => { clock = t } }
+}
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+test('a WebSocket with ping(): pings while connected and counts pong/ping as a frame; stops pinging when replaced', async () => {
+  const p = pingSetup((url) => new PingWs(url, []))
+  p.socket.start()
+  await flush()
+  const ws = p.sockets[0] as PingWs
+  ws.emit({ type: 'hello' })
+  await wait(30)
+  expect(ws.pings).toBeGreaterThan(0)
+  p.setClock(5000)
+  ws.fire('pong')
+  expect(p.socket.lastFrameAt()).toBe(5000)
+  p.setClock(7000)
+  ws.fire('ping')
+  expect(p.socket.lastFrameAt()).toBe(7000)
+  p.socket.reconnect('stale')
+  await flush()
+  const pings = ws.pings
+  expect(ws.listeners.pong).toEqual([])
+  expect(ws.listeners.ping).toEqual([])
+  await wait(30)
+  expect(ws.pings).toBe(pings)
+  p.socket.stop()
+})
+
+test('a WebSocket without ping() keeps the silence fallback: no pinging, frames still tracked', async () => {
+  const p = pingSetup((url) => new FakeWs(url, []))
+  p.socket.start()
+  await flush()
+  const ws = p.sockets[0]!
+  ws.emit({ type: 'hello' })
+  await wait(20)
+  p.setClock(3000)
+  ws.emit({ type: 'whatever' })
+  expect(p.socket.lastFrameAt()).toBe(3000)
+  expect(p.socket.isConnected()).toBe(true)
+  p.socket.stop()
+})
+
+test('ping() without addEventListener is not used (pong could not be observed)', async () => {
+  class HalfPing extends FakeWs { pings = 0; ping() { this.pings++ } }
+  const p = pingSetup((url) => new HalfPing(url, []))
+  p.socket.start()
+  await flush()
+  const ws = p.sockets[0] as HalfPing
+  ws.emit({ type: 'hello' })
+  await wait(20)
+  expect(ws.pings).toBe(0)
+  p.socket.stop()
+})

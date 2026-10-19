@@ -16,7 +16,7 @@ export type OrchestratorDeps = {
   cfg: Config; store: Pick<StateStore, 'save'>; state: State; slack: SlackClient;
   collector: Pick<Collector, 'tick'> & Partial<Pick<Collector, 'socketConnected' | 'socketEpoch'>>; tg: TelegramBot; channel: Pick<Channel, 'notify'>; now?: () => number
   /** Socket Mode: ticks every drainSeconds and mostly drain the socket queue; polling reconciles every socketReconcileTicks. */
-  socket?: Pick<SlackSocket, 'isConnected' | 'epoch' | 'reconnect' | 'lastFrameAt'>
+  socket?: Pick<SlackSocket, 'isConnected' | 'epoch' | 'reconnect' | 'lastFrameAt'> & Partial<Pick<SlackSocket, 'gaveUp'>>
 }
 
 const CLOSED: ItemStatus[] = ['sent', 'skipped', 'answered_manually']
@@ -36,6 +36,8 @@ export class Orchestrator {
   private readonly msgs: ItemMessages
   private lastTickEnd: number | undefined
   private lastSave: number | undefined
+  /** The socket gave up for good: ticks run every pollSeconds, as without Socket Mode. */
+  private pollingOnly = false
 
   constructor(private readonly d: OrchestratorDeps) {
     this.now = d.now ?? Date.now
@@ -55,7 +57,19 @@ export class Orchestrator {
       }
     }
     tg.onInbound((i) => this.handle(i))
-    this.timer = setInterval(() => { void this.tick() }, (this.d.socket ? cfg.drainSeconds : cfg.pollSeconds) * 1000)
+    this.schedule(this.d.socket ? cfg.drainSeconds : cfg.pollSeconds)
+  }
+
+  private schedule(seconds: number): void {
+    if (this.timer !== undefined) clearInterval(this.timer)
+    this.timer = setInterval(() => { void this.tick() }, seconds * 1000)
+  }
+
+  /** Without a socket there is nothing to drain: polling every drainSeconds would only burn Slack's rate limit. */
+  private fallBackToPolling(): void {
+    this.pollingOnly = true
+    log(`socket gave up: polling every ${this.d.cfg.pollSeconds}s`)
+    if (this.timer !== undefined) this.schedule(this.d.cfg.pollSeconds)
   }
 
   stop(): void {
@@ -80,7 +94,8 @@ export class Orchestrator {
     try {
       const now = this.now()
       if (this.d.socket) {
-        this.checkSocket(this.d.socket, now)
+        if (!this.pollingOnly && this.d.socket.gaveUp?.()) this.fallBackToPolling()
+        if (!this.pollingOnly) this.checkSocket(this.d.socket, now)
         collector.socketConnected = this.d.socket.isConnected() // down: poll every tick
         collector.socketEpoch = this.d.socket.epoch() // a reconnect since the last tick: poll, trust no cursor
       }

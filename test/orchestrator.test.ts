@@ -1041,3 +1041,28 @@ test('a tick that changes nothing does not save; changes save at once; idle tick
   await e.orch.tick()
   expect(e.saves()).toBe(base + 2)
 })
+
+test('socket mode: once the socket gives up, the timer switches from drainSeconds to pollSeconds (once) and says so', async () => {
+  const sock = { ...fakeSocket(), isConnected: () => false, given: false, gaveUp() { return this.given } }
+  const intervals: number[] = []
+  const cleared: unknown[] = []
+  const setSpy = spyOn(globalThis, 'setInterval').mockImplementation(((_fn: () => void, ms: number) => { intervals.push(ms); return intervals.length as never }) as never)
+  const clearSpy = spyOn(globalThis, 'clearInterval').mockImplementation(((t: unknown) => { cleared.push(t) }) as never)
+  try {
+    const e = await setup({}, emptyState(), undefined, sock)
+    await e.orch.tick()
+    expect(intervals).toEqual([5000])
+    sock.given = true
+    e.advance(5_000)
+    await e.orch.tick()
+    expect(intervals).toEqual([5000, 3_600_000])
+    expect(cleared).toEqual([1])
+    const lines = stderr.mock.calls.map((c: unknown[]) => String(c[0]))
+    expect(lines).toContain('ping-assistant: socket gave up: polling every 3600s\n')
+    e.advance(3_600_000) // a poll-length gap is no reason to touch the dead socket
+    await e.orch.tick()
+    expect(intervals).toEqual([5000, 3_600_000])
+    expect(sock.reasons).toEqual([])
+    e.orch.stop()
+  } finally { setSpy.mockRestore(); clearSpy.mockRestore() }
+})
