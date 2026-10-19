@@ -15,6 +15,8 @@ const defaultSleep: Sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 /** The polling reads (Slack tier 2-3): the only calls that count against the per-tick budget. */
 const BUDGETED = new Set(['conversations.history', 'conversations.replies', 'users.conversations', 'search.messages'])
 export const DEFAULT_REQUEST_BUDGET = 40
+/** A hung Slack request must not freeze the tick (and with it shutdown's final save). */
+export const DEFAULT_TIMEOUT_MS = 30_000
 
 /** Thrown instead of calling Slack once a tick has used its request budget. */
 export class BudgetExceeded extends Error {
@@ -39,7 +41,25 @@ export class SlackClient {
     private readonly token: string,
     private readonly fetchImpl: typeof fetch = fetch,
     private readonly sleep: Sleep = defaultSleep,
+    private readonly timeoutMs = DEFAULT_TIMEOUT_MS,
   ) {}
+
+  /**
+   * Runs one request (fetch and body) under a deadline. The signal aborts a real fetch; the race also
+   * covers an implementation that ignores it.
+   */
+  private timed<T>(what: string, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const signal = AbortSignal.timeout(this.timeoutMs)
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = () => {
+        const err = new Error(`slack ${what}: timed out after ${this.timeoutMs}ms`)
+        err.name = 'TimeoutError'
+        reject(err)
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+      fn(signal).then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+    })
+  }
 
   private used = 0
   private limit = Infinity
@@ -51,14 +71,19 @@ export class SlackClient {
   }
 
   private async send(method: string, init: RequestInit, url: string): Promise<SlackResponse> {
-    let res = await this.fetchImpl(url, init)
-    if (res.status === 429) {
-      const seconds = Number(res.headers.get('Retry-After'))
+    const once = () => this.timed(method, async (signal) => {
+      const res = await this.fetchImpl(url, { ...init, signal })
+      if (res.status === 429) return { limited: true as const, retryAfter: res.headers.get('Retry-After') }
+      return { limited: false as const, body: (await res.json()) as SlackResponse }
+    })
+    let r = await once()
+    if (r.limited) {
+      const seconds = Number(r.retryAfter)
       await this.sleep((Number.isFinite(seconds) && seconds > 0 ? seconds : 1) * 1000)
-      res = await this.fetchImpl(url, init)
-      if (res.status === 429) throw new Error(`slack ${method}: HTTP 429`)
+      r = await once()
+      if (r.limited) throw new Error(`slack ${method}: HTTP 429`)
     }
-    const body = (await res.json()) as SlackResponse
+    const body = r.body
     if (!body.ok) throw new Error(`slack ${method}: ${body.error ?? 'unknown_error'}`)
     return body
   }
@@ -151,8 +176,11 @@ export class SlackClient {
   }
 
   async downloadFile(url: string, dest: string): Promise<void> {
-    const res = await this.fetchImpl(url, { headers: { Authorization: `Bearer ${this.token}` } })
-    if (!res.ok) throw new Error(`slack download: HTTP ${res.status}`)
-    writeFileSync(dest, new Uint8Array(await res.arrayBuffer()))
+    const bytes = await this.timed('download', async (signal) => {
+      const res = await this.fetchImpl(url, { headers: { Authorization: `Bearer ${this.token}` }, signal })
+      if (!res.ok) throw new Error(`slack download: HTTP ${res.status}`)
+      return new Uint8Array(await res.arrayBuffer())
+    })
+    writeFileSync(dest, bytes)
   }
 }

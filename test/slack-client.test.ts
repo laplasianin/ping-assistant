@@ -146,3 +146,21 @@ test('searchMentions survives a malformed permalink (no thread)', async () => {
   const out = await new SlackClient('t', fetchImpl).searchMentions('U1', '2026-10-01')
   expect(out.map((m) => [m.ts, m.thread_ts])).toEqual([['2', undefined]])
 })
+
+test('a hung request rejects after the timeout; every fetch carries an abort signal', async () => {
+  const signals: (AbortSignal | null | undefined)[] = []
+  const never = ((_: unknown, init?: RequestInit) => { signals.push(init?.signal); return new Promise<Response>(() => {}) }) as typeof fetch
+  const c = new SlackClient('t', never, async () => {}, 20)
+  const started = Date.now()
+  await expect(c.history('C1')).rejects.toThrow('slack conversations.history: timed out after 20ms')
+  await expect(c.postMessage('C1', 'hi')).rejects.toThrow('timed out')
+  await expect(c.downloadFile('https://files/x', '/tmp/ping-assistant-never')).rejects.toThrow('slack download: timed out after 20ms')
+  expect(Date.now() - started).toBeLessThan(1000)
+  expect(signals).toHaveLength(3)
+  expect(signals.every((s) => s instanceof AbortSignal)).toBe(true)
+})
+
+test('a body that never arrives also times out', async () => {
+  const stalled = (async () => ({ status: 200, headers: new Headers(), json: () => new Promise(() => {}) }) as unknown as Response) as typeof fetch
+  await expect(new SlackClient('t', stalled, async () => {}, 20).userName('U1')).rejects.toThrow('timed out')
+})

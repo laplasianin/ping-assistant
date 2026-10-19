@@ -21,6 +21,8 @@ export interface TelegramApi {
 const DEFAULT_PID_FILE = join(homedir(), '.config', 'ping-assistant', 'bot.pid')
 const HELP = 'Ping Assistant: отвечай на вопросы из Slack кнопками или текстом («14 1», «14: свой текст», «14 пропустить»).'
 
+const POLLER_DEAD = '⛔ Telegram-поллер остановлен (409): другой процесс держит токен бота. Перезапусти ping-assistant.'
+
 const STABLE_MS = 60_000
 const MAX_CONFLICTS = 8
 
@@ -171,6 +173,12 @@ export class TelegramBot {
           const is409 = err instanceof GrammyError && err.error_code === 409
           if (is409 && ++conflicts >= MAX_CONFLICTS) {
             this.log('409 Conflict persists, another poller holds the token; giving up')
+            // sendMessage needs no polling: tell Ilya, or buttons would silently stop working.
+            try {
+              await this.api.sendMessage(this.chatId, POLLER_DEAD)
+            } catch (sendErr) {
+              this.log(`poller-stopped notice failed: ${sendErr instanceof Error ? sendErr.name : 'unknown'}`)
+            }
             return
           }
           const delay = Math.min(1000 * failures, 15_000)

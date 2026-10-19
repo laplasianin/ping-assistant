@@ -177,13 +177,16 @@ const conflict = () => new GrammyError('x', { ok: false, error_code: 409, descri
 test('gives up after 8 consecutive 409s even though onStart fires each time', async () => {
   let calls = 0
   const sleeps: number[] = []
-  const { bot } = setup({
+  const { bot, api } = setup({
     startPolling: async (onStart) => { calls++; onStart(); throw conflict() },
     sleep: async (ms) => { sleeps.push(ms) },
   })
   await bot.poll()
   expect(calls).toBe(8)
   expect(sleeps).toEqual([1000, 2000, 3000, 4000, 5000, 6000, 7000])
+  expect(api.of('sendMessage').map((c) => c.args.slice(0, 2))).toEqual([
+    [CHAT, '⛔ Telegram-поллер остановлен (409): другой процесс держит токен бота. Перезапусти ping-assistant.'],
+  ])
 })
 
 test('stop() during backoff prevents another start', async () => {
