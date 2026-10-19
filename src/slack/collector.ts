@@ -22,7 +22,8 @@ const MPIM_SWEEP_EVERY = 10
 /** IMs are read when the `is:dm` search finds something new; this sweep is only the safety net for a stale index. */
 const IM_SWEEP_EVERY = 30
 /** search.messages indexes with a lag: the floor trails the newest hit so late-indexed messages are still found. */
-const SEARCH_LAG_S = 600
+/** Search index lag: the search floors trail the newest hit by this much, so recent hits are re-read. */
+export const SEARCH_LAG_S = 600
 
 export function cmpTs(a: string, b: string): number {
   const [as = '0', af = ''] = a.split('.')

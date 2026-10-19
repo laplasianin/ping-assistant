@@ -1095,3 +1095,26 @@ test('the orchestrator prunes old closed items at most once an hour and saves af
   expect(state.items['4']).toBeUndefined()
   expect(e.saves()).toBe(saves + 1)
 })
+
+test('a pruned mention item whose hit is still above the search floor is not re-ingested on the next poll', async () => {
+  const DAY = 86_400_000
+  const ts = (ms: number) => `${ms / 1000}.000000`
+  const hit = T0 - 8 * DAY // older than followUpDays, but the newest mention: every search returns it
+  const state = emptyState()
+  state.cursors = { lastTick: ts(T0 - 60_000), 'hist:C1': ts(T0 - 60_000), search: ts(hit - 600_000), dmsearch: ts(T0 - 60_000) }
+  state.items['1'] = {
+    id: '1', seq: 1, sub: 0, status: 'ignored', source: 'mention', channel: 'C9', author: 'U2', messages: [], context: [],
+    lastSeenTs: ts(hit), createdAt: hit, lastMessageAt: hit, telegram: {},
+  }
+  state.msgIndex[`C9:${ts(hit)}`] = '1'
+  state.nextSeq = 2
+  const e = await setup({}, state, (slack, cfg) => new Collector(slack as never, cfg, state, '/tmp/ping-assistant-test/files'))
+  e.slack.searchMentions = async () => [{ ts: ts(hit), user: 'U2', text: '<@ME> глянь', channel: 'C9' }]
+  ;(e.slack as unknown as { searchDms: () => Promise<RawMsg[]> }).searchDms = async () => []
+  await e.orch.tick() // prunes the old ignored item
+  expect(state.items['1']).toBeUndefined()
+  e.advance(5_000)
+  await e.orch.tick() // the same hit comes back from search
+  expect(Object.keys(state.items)).toEqual([])
+  expect(state.cursors.search).toBe(ts(hit - 600_000))
+})

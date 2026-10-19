@@ -297,3 +297,20 @@ test('prune drops closed items older than followUpDays with their msgIndex entri
   expect(s.msgIndex[`D2:${sec(recent)}`]).toBe('own')
   expect(prune(s, now, cfg)).toBe(false) // nothing left to prune
 })
+
+test('prune keeps index entries above the search/dmsearch floors (minus the index lag), even older than followUpDays', () => {
+  const DAY = 86_400_000
+  const now = T0 + 30 * DAY
+  const sec = (ms: number) => `${ms / 1000}.000000`
+  const hit = now - 8 * DAY
+  const s = emptyState()
+  s.cursors = { search: sec(hit - 600_000), dmsearch: sec(now - 60_000) }
+  s.items['1'] = seeded({ id: '1', seq: 1, status: 'ignored', channel: 'C9', threadTs: undefined, createdAt: hit, lastMessageAt: hit })
+  s.msgIndex[`C9:${sec(hit)}`] = '1'           // the newest mention: every search still returns it
+  s.msgIndex[`D1:${sec(hit - 900_000)}`] = 'own' // within the lag below the floor: search may still return it
+  s.msgIndex[`D1:${sec(hit - 1_300_000)}`] = 'own' // below floor − lag: gone
+
+  expect(prune(s, now, cfg)).toBe(true)
+  expect(s.items['1']).toBeUndefined()
+  expect(Object.keys(s.msgIndex).sort()).toEqual([`C9:${sec(hit)}`, `D1:${sec(hit - 900_000)}`])
+})

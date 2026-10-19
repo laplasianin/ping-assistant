@@ -1,5 +1,5 @@
 import type { Config } from './config'
-import { cmpTs } from './slack/collector'
+import { cmpTs, SEARCH_LAG_S } from './slack/collector'
 import { OWN_MSG, type Item, type ItemSource, type ItemStatus, type SlackMsg, type State } from './state'
 
 export function conversationKey(m: SlackMsg): string {
@@ -112,9 +112,14 @@ const DAY_MS = 86_400_000
  * (unless their thread is still watched: a follow-up needs its parent) with their msgIndex entries, and any
  * msgIndex entry older than followUpDays that no remaining item refers to (own-message sentinels included).
  * Open items (settling, triage, awaiting) are never touched. Returns whether anything was removed.
+ * An entry at or above the search floors (search, dmsearch) minus SEARCH_LAG_S always stays: those searches
+ * return such hits again every tick, and only msgIndex keeps them from becoming duplicate items.
  */
 export function prune(state: State, now: number, cfg: Config): boolean {
   const cutoff = now - cfg.followUpDays * DAY_MS
+  const floors = [state.cursors.search ?? state.cursors.lastTick, state.cursors.dmsearch ?? state.cursors.lastTick]
+    .filter((f): f is string => f !== undefined).map(Number)
+  const keepAbove = floors.length ? (Math.min(...floors) - SEARCH_LAG_S) * 1000 : Infinity // no search yet: nothing to protect
   const pruned = new Set<string>()
   for (const item of Object.values(state.items)) {
     if (!TERMINAL.includes(item.status) || Math.max(item.createdAt, item.lastMessageAt) >= cutoff) continue
@@ -125,8 +130,9 @@ export function prune(state: State, now: number, cfg: Config): boolean {
   }
   let removed = 0
   for (const [key, value] of Object.entries(state.msgIndex)) {
-    const old = Number(key.slice(key.lastIndexOf(':') + 1)) * 1000 < cutoff
-    if (pruned.has(value) || (old && (value === OWN_MSG || !state.items[value]))) { delete state.msgIndex[key]; removed++ }
+    const at = Number(key.slice(key.lastIndexOf(':') + 1)) * 1000
+    if (at >= keepAbove) continue // a pruned item's entry stays too: it still deduplicates the re-read hit
+    if (pruned.has(value) || (at < cutoff && (value === OWN_MSG || !state.items[value]))) { delete state.msgIndex[key]; removed++ }
   }
   return pruned.size > 0 || removed > 0
 }
