@@ -89,9 +89,14 @@ cp ping-assistant.config.example.json ping-assistant.config.json
 bin/ping-assistant-up
 ```
 
-Это `caffeinate -i claude --setting-sources project --permission-mode dontAsk --plugin-dir . --channels plugin:ping-assistant@local`,
-запущенный из корня проекта; дополнительные аргументы пробрасываются в `claude`. Флаг `--channels`
-требует тег `plugin:<name>@<marketplace>`: голый `plugin:ping-assistant` CLI отклоняет.
+Это `caffeinate -i claude --setting-sources project --permission-mode dontAsk --dangerously-load-development-channels ping-assistant`,
+запущенный из корня проекта; дополнительные аргументы пробрасываются в `claude`. Сервер объявлен
+в `.mcp.json` проекта (`enableAllProjectMcpServers: true` в настройках проекта снимает вопрос об
+одобрении), а флаг `--dangerously-load-development-channels` делает его каналом. Путь через
+плагин (`--plugin-dir . --channels plugin:ping-assistant@local`) не работает: канал
+`plugin:…` требует *установленного* плагина из маркетплейса, `--plugin-dir` установкой не считается,
+и CLI пишет «plugin not installed» и «not on the approved channels allowlist». Инструменты сессии
+называются `mcp__ping-assistant__<tool>`.
 Первый тик (через `pollSeconds`) ставит курсоры на «сейчас», прошлое не разбирается.
 
 Два флага безопасности, без них гарантия «ничего не уходит без подтверждения» не механическая:
@@ -216,9 +221,13 @@ Slack читается по-настоящему, отправки нет.
 - Метод уведомления `notifications/claude/channel`, capability `experimental['claude/channel']`,
   params `{ content, meta }`.
 - `--channels plugin:ping-assistant` CLI отклоняет («entries must be tagged:
-  plugin:<name>@<marketplace>»); `plugin:ping-assistant@local` с `--plugin-dir .` принимается.
-- Имя инструмента плагина: `mcp__plugin_ping-assistant_ping-assistant__<tool>`. Без allow-правила
-  вызов упирается в запрос разрешения; нужные правила лежат в `.claude/settings.json`.
+  plugin:<name>@<marketplace>»); `plugin:ping-assistant@local` с `--plugin-dir .` принимается
+  синтаксически, но канал не активируется: «plugin not installed» и «not on the approved channels
+  allowlist». Рабочий путь — сервер из `.mcp.json` плюс
+  `--dangerously-load-development-channels ping-assistant` (см. «Запуск»).
+- Имя инструмента: `mcp__ping-assistant__<tool>` (для плагинного пути было бы
+  `mcp__plugin_ping-assistant_ping-assistant__<tool>`). Без allow-правила вызов упирается в
+  запрос разрешения; нужные правила лежат в `.claude/settings.json`.
 - Не проверено автоматически: пробуждение интерактивной сессии сообщением
   `<channel source="ping-assistant" …>` (нужен живой терминал). Запасной вариант — раздел 4
   спецификации (`/loop 1m` + `next_items`).

@@ -1,12 +1,13 @@
 {
+  "enableAllProjectMcpServers": true,
   "permissions": {
     "allow": [
-      "mcp__plugin_ping-assistant_ping-assistant__propose",
-      "mcp__plugin_ping-assistant_ping-assistant__ignore",
-      "mcp__plugin_ping-assistant_ping-assistant__close",
-      "mcp__plugin_ping-assistant_ping-assistant__list_items",
-      "mcp__plugin_ping-assistant_ping-assistant__list_ignored",
-      "mcp__plugin_ping-assistant_ping-assistant__say",
+      "mcp__ping-assistant__propose",
+      "mcp__ping-assistant__ignore",
+      "mcp__ping-assistant__close",
+      "mcp__ping-assistant__list_items",
+      "mcp__ping-assistant__list_ignored",
+      "mcp__ping-assistant__say",
       "Read",
       "Grep",
       "Glob",
