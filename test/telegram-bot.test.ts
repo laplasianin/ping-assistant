@@ -84,7 +84,7 @@ test('text reply quoting an item message resolves itemId', async () => {
 test('callback pa:choose:14:2 yields choose command and answers the callback', async () => {
   const { bot, api, inbound } = setup()
   await bot.ingest(callbackUpdate(11, 42, 42, 'pa:choose:14:2', 55))
-  expect(inbound).toEqual([{ cmd: { kind: 'choose', itemId: '14', n: 2 }, messageId: 55 }])
+  expect(inbound).toEqual([{ cmd: { kind: 'choose', itemId: '14', n: 2 }, messageId: 55, button: true }])
   expect(api.of('answerCallbackQuery')).toEqual([{ method: 'answerCallbackQuery', args: ['cb11', undefined] }])
   await bot.ingest(callbackUpdate(12, 42, 42, 'garbage', 55))
   expect(inbound).toHaveLength(1)
@@ -113,6 +113,13 @@ test('edit without keyboard removes reply_markup', async () => {
   const edits = api.of('editMessageText')
   expect(edits[0]?.args).toEqual([CHAT, 5, 'done', { reply_markup: { inline_keyboard: [] } }])
   expect(edits[1]?.args).toEqual([CHAT, 6, 'again', { reply_markup: { inline_keyboard: [[{ text: 'X', callback_data: 'pa:cancel:1' }]] } }])
+})
+
+test('dropKeyboard edits only the reply markup', async () => {
+  const { bot, api } = setup()
+  await bot.dropKeyboard(7)
+  expect(api.of('editMessageReplyMarkup')).toEqual([{ method: 'editMessageReplyMarkup', args: [CHAT, 7, { reply_markup: { inline_keyboard: [] } }] }])
+  expect(api.of('editMessageText')).toEqual([])
 })
 
 test('callback from the right chat but wrong sender is rejected', async () => {
@@ -155,7 +162,7 @@ test('a failing answerCallbackQuery does not drop the command', async () => {
   const { bot, api, inbound } = setup()
   api.answerCallbackQuery = async () => { throw new Error('400 query is too old') }
   await bot.ingest(callbackUpdate(24, 42, 42, 'pa:skip:14', 5))
-  expect(inbound).toEqual([{ cmd: { kind: 'skip', itemId: '14' }, messageId: 5 }])
+  expect(inbound).toEqual([{ cmd: { kind: 'skip', itemId: '14' }, messageId: 5, button: true }])
 })
 
 test('isOurProcess matches only our entry point', () => {

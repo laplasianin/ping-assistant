@@ -49,17 +49,20 @@ class FakeApi implements TelegramApi {
   failNextSend = false
   edits: { id: number; text: string; opts: Record<string, any> }[] = []
   nextId = 100
+  dropped: number[] = []
   async sendMessage(_chat: string, text: string, opts: Record<string, any> = {}) {
     if (this.failNextSend) { this.failNextSend = false; throw new Error('telegram down') }
+    if (text.length > 4096) throw new Error('Bad Request: message is too long')
     const id = this.nextId++
     this.sent.push({ text, opts, id })
     return { message_id: id }
   }
   async editMessageText(_chat: string, id: number, text: string, opts: Record<string, any> = {}) {
+    if (text.length > 4096) throw new Error('Bad Request: MESSAGE_TOO_LONG')
     this.edits.push({ id, text, opts })
     return true
   }
-  async editMessageReplyMarkup() { return true }
+  async editMessageReplyMarkup(_chat: string, id: number) { this.dropped.push(id); return true }
   async answerCallbackQuery() { return true }
   last(): Sent { return this.sent[this.sent.length - 1]! }
   lastEdit(id: number) { return this.edits.filter((e) => e.id === id).pop() }
@@ -562,4 +565,91 @@ test('reply in a thread ping-assistant answered in creates item 1.1 with full th
   const body = JSON.parse(e.notes[1]!.content)
   expect(body).toMatchObject({ id: '1.1', source: 'followup', threadTs: root, messages: [{ ts: reply, text: 'Спасибо, а когда?' }] })
   expect(body.context.map((m: SlackMsg) => [m.ts, m.text])).toEqual([[root, 'root'], [ts(-30), 'Почему падает сборка?'], [mine, 'Починю сегодня']])
+})
+
+test('a stale choose button from a superseded item message posts nothing', async () => {
+  const e = await setup()
+  await matureThreadItem(e)
+  const first = await propose(e, ['old a', 'old b'])
+  await propose(e, ['new a', 'new b'])
+  await e.callback('pa:choose:1:2', first.id)
+
+  expect(e.slack.posted).toEqual([])
+  expect(e.api.last().text).toBe('Кнопка устарела, см. #1 ниже')
+  expect(e.state.items['1']!.status).toBe('awaiting')
+  await e.text('1 2') // the text command acts on the current variants
+  expect(e.slack.posted).toEqual([{ channel: 'C1', text: 'new b', threadTs: '100.000000' }])
+})
+
+test('a stale proposal tap posts nothing; the new proposal confirms its own text', async () => {
+  const e = await setup()
+  await matureThreadItem(e)
+  await propose(e, ['a', 'b'])
+  const p1 = await propose(e, ['первая правка'], 'final')
+  const p2 = await propose(e, ['вторая правка'], 'final')
+  expect(e.api.dropped).toContain(p1.id) // old proposal lost its buttons
+
+  await e.callback('pa:confirm:1', p1.id)
+  expect(e.slack.posted).toEqual([])
+  expect(e.api.last().text).toBe('Кнопка устарела, см. #1 ниже')
+  expect(e.state.items['1']!.pendingText).toBe('вторая правка')
+
+  await e.callback('pa:cancel:1', p1.id)
+  expect(e.state.items['1']!.pendingText).toBe('вторая правка') // stale cancel changes nothing
+
+  await e.callback('pa:confirm:1', p2.id)
+  expect(e.slack.posted).toEqual([{ channel: 'C1', text: 'вторая правка', threadTs: '100.000000' }])
+})
+
+test('a stale force button from an older warning posts nothing; a live warning supersedes the proposal', async () => {
+  const e = await setup()
+  await matureThreadItem(e)
+  const sent = await propose(e, ['a', 'b'])
+  e.slack.repl['C1:100.000000'] = [{ ts: '108.000000', user: 'U5', text: 'Уже починил' }]
+  await e.callback('pa:choose:1:1', sent.id)
+  const w1 = e.api.last()
+  await e.callback('pa:choose:1:2', sent.id)
+  const w2 = e.api.last()
+  expect(e.api.dropped).toContain(w1.id)
+  expect(e.state.items['1']!.telegram.warningMessageId).toBe(w2.id)
+
+  await e.callback('pa:force:1', w1.id)
+  expect(e.slack.posted).toEqual([])
+  expect(e.api.last().text).toBe('Кнопка устарела, см. #1 ниже')
+
+  // A proposal whose confirm raised a warning can no longer confirm: only the warning decides.
+  const p = await propose(e, ['правка'], 'final')
+  await e.callback('pa:confirm:1', p.id)
+  const w3 = e.api.last()
+  expect(w3.text).toContain('в треде появилось новое')
+  expect(e.api.dropped).toContain(p.id)
+  await e.callback('pa:confirm:1', p.id)
+  expect(e.api.last().text).toBe('Кнопка устарела, см. #1 ниже')
+  expect(e.slack.posted).toEqual([])
+
+  await e.callback('pa:force:1', w3.id)
+  expect(e.slack.posted).toEqual([{ channel: 'C1', text: 'правка', threadTs: '100.000000' }])
+  expect(e.api.lastEdit(p.id)!.text).toContain('✅ отправлено')
+  expect(e.api.dropped).toContain(w3.id)
+})
+
+test('a long (>4096) item: revision leaves no live old buttons and the outcome edit succeeds', async () => {
+  const e = await setup()
+  await matureThreadItem(e, "Длинный вопрос. ".repeat(400)) // ~6400 chars: several Telegram messages
+  const sendsBefore = e.api.sent.length
+  const first = await propose(e, ['a', 'b'])
+  expect(e.api.sent.length - sendsBefore).toBeGreaterThan(1)
+  expect(buttons(first)).toEqual(['1', '2', 'Пропустить'])
+  expect(e.state.items['1']!.telegram.text!.length).toBeLessThanOrEqual(4096)
+
+  const second = await propose(e, ['c', 'd'])
+  const revised = e.api.lastEdit(first.id)!
+  expect(revised.text).toEndWith('✏️ правка ниже')
+  expect(revised.opts.reply_markup).toEqual({ inline_keyboard: [] })
+
+  await e.callback('pa:choose:1:2', second.id)
+  expect(e.slack.posted).toEqual([{ channel: 'C1', text: 'd', threadTs: '100.000000' }])
+  const done = e.api.lastEdit(second.id)!
+  expect(done.text).toEndWith('✅ отправлен вариант 2')
+  expect(done.opts.reply_markup).toEqual({ inline_keyboard: [] })
 })

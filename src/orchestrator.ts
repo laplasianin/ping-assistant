@@ -3,7 +3,7 @@
 import type { Channel, ChannelHandlers } from './channel'
 import type { Command } from './commands'
 import type { Config } from './config'
-import { outcome, renderItem, renderProposal, renderThreadChanged, renderUpdate, slackify, type Keyboard } from './format'
+import { chunk, outcome, renderItem, renderProposal, renderThreadChanged, renderUpdate, slackify, type Keyboard } from './format'
 import { ingest, mature } from './items'
 import type { RawMsg, SlackClient } from './slack/client'
 import { cmpTs, type Collector } from './slack/collector'
@@ -21,8 +21,14 @@ const DAY_MS = 86_400_000
 const log = (kind: string): void => { process.stderr.write(`ping-assistant: ${kind}\n`) }
 const errName = (err: unknown): string => (err instanceof Error ? err.name : 'unknown')
 const isDm = (item: Item): boolean => item.source === 'im' || item.source === 'mpim'
+const TG_LIMIT = 4096
+/** The text of the last Telegram message a long text is split into: the one carrying the buttons. */
+const lastPart = (text: string): string => chunk(text, TG_LIMIT).pop() ?? ''
 /** The item's message text without the trailing «Ответь: …» hint line. */
-const withoutHint = (text: string): string => text.slice(0, text.lastIndexOf('\n\n'))
+const withoutHint = (text: string): string => {
+  const cut = text.lastIndexOf('\n\n')
+  return cut < 0 ? '' : text.slice(0, cut)
+}
 
 const msgJson = (m: SlackMsg) => ({ ts: m.ts, user: m.user, userName: m.userName, text: m.text, ...(m.files ? { files: m.files } : {}) })
 
@@ -47,9 +53,8 @@ export class Orchestrator {
   start(): void {
     const { tg, state, cfg } = this.d
     for (const item of Object.values(state.items)) {
-      const { messageId, proposalMessageId } = item.telegram
-      if (messageId !== undefined) tg.registerMessage(messageId, item.id)
-      if (proposalMessageId !== undefined) tg.registerMessage(proposalMessageId, item.id)
+      const { messageId, proposalMessageId, warningMessageId } = item.telegram
+      for (const id of [messageId, proposalMessageId, warningMessageId]) if (id !== undefined) tg.registerMessage(id, item.id)
     }
     tg.onInbound((i) => this.handle(i))
     this.timer = setInterval(() => { void this.tick() }, cfg.pollSeconds * 1000)
@@ -88,7 +93,7 @@ export class Orchestrator {
 
   async handle(i: Inbound): Promise<void> {
     log(`command ${i.cmd.kind}`)
-    await this.safely(`command ${i.cmd.kind}`, () => this.dispatch(i.cmd, i.messageId))
+    await this.safely(`command ${i.cmd.kind}`, () => this.dispatch(i.cmd, i.messageId, i.button === true))
     this.save()
   }
 
@@ -148,6 +153,7 @@ export class Orchestrator {
       const pendingText = slackify(variants[0] ?? '')
       const p = renderProposal(item, pendingText)
       const pid = await show(p.text, p.keyboard)
+      await this.retireHeldButtons(item) // an older proposal or warning must not confirm this text
       Object.assign(item, { analysis, status: 'awaiting', pendingText, forceSend: undefined })
       item.telegram.proposalMessageId = pid
       item.telegram.chosen = undefined
@@ -159,14 +165,29 @@ export class Orchestrator {
     const r = renderItem({ ...item, analysis, variants }, state.users, state.channels, this.now())
     const mid = await show(r.text, r.keyboard)
     await this.annotate(item, '✏️ правка ниже') // old message, still described by item.telegram
+    await this.retireHeldButtons(item)
     Object.assign(item, { analysis, variants, status: 'awaiting', pendingText: undefined, forceSend: undefined })
-    item.telegram = { messageId: mid, text: withoutHint(r.text) }
+    // Long items arrive in several messages; only the last one (with the buttons) is ever edited.
+    item.telegram = { messageId: mid, text: withoutHint(lastPart(r.text)) || `#${item.id}` }
     tg.registerMessage(mid, item.id)
     this.save()
     return `#${id}: variants shown to Ilya`
   }
 
-  private async dispatch(c: Command, messageId: number): Promise<void> {
+  /** A button acts only from the message that currently owns that action; older copies are stale. */
+  private staleButton(item: Item, c: Command, messageId: number): boolean {
+    const { messageId: original, proposalMessageId: proposal, warningMessageId: warning } = item.telegram
+    switch (c.kind) {
+      case 'choose': return messageId !== original
+      // A live warning supersedes the proposal it was raised for.
+      case 'confirm': return warning !== undefined || messageId !== proposal
+      case 'force': return messageId !== warning
+      case 'cancel': return warning !== undefined ? messageId !== warning : messageId !== proposal
+      default: return false // skip sends nothing: allowed from any of the item's messages
+    }
+  }
+
+  private async dispatch(c: Command, messageId: number, button = false): Promise<void> {
     const { state, tg } = this.d
     if (c.kind === 'forward') {
       const item = c.itemId ? state.items[c.itemId] : undefined
@@ -181,6 +202,7 @@ export class Orchestrator {
     const item = state.items[c.itemId]
     if (!item) { await tg.send(`Не знаю айтем #${c.itemId}`); return }
     if (item.status !== 'awaiting') { await tg.send(`#${item.id} уже закрыт: ${outcome(item) || item.status}`); return }
+    if (button && this.staleButton(item, c, messageId)) { await tg.send(`Кнопка устарела, см. #${item.id} ниже`); return }
 
     switch (c.kind) {
       case 'choose': {
@@ -198,15 +220,18 @@ export class Orchestrator {
       case 'skip':
         item.status = 'skipped'
         this.clearHeld(item)
+        await this.retireHeldButtons(item)
         return this.closeOriginal(item)
       case 'cancel': {
+        // A text «cancel» does not exist: messageId is the proposal or warning that carried the button.
         const isProposal = messageId === item.telegram.proposalMessageId
-        const text = isProposal && item.pendingText ? renderProposal(item, item.pendingText).text : `#${item.id}`
+        const text = isProposal && item.pendingText ? lastPart(renderProposal(item, item.pendingText).text) : `#${item.id}`
         await this.edit(messageId, `${text}\n\n❌ отменено`)
         this.clearHeld(item)
+        await this.retireHeldButtons(item, messageId)
         if (item.telegram.messageId !== undefined && item.variants) {
           const r = renderItem(item, state.users, state.channels, this.now())
-          await this.edit(item.telegram.messageId, r.text, r.keyboard)
+          await this.edit(item.telegram.messageId, lastPart(r.text), r.keyboard)
         }
       }
     }
@@ -247,7 +272,9 @@ export class Orchestrator {
     this.clearHeld(item)
     await this.annotate(item, outcome(item, chosen))
     const proposal = item.telegram.proposalMessageId
-    if (proposal !== undefined) await this.edit(proposal, `${renderProposal(item, text).text}\n\n${outcome(item)}`)
+    if (proposal !== undefined) await this.edit(proposal, `${lastPart(renderProposal(item, text).text)}\n\n${outcome(item)}`)
+    const warning = item.telegram.warningMessageId
+    if (warning !== undefined) await this.dropKeyboard(warning)
     if (!cfg.dryRun) {
       const link = await slack.permalink(item.channel, item.sentTs).catch(() => undefined)
       await tg.send(`✅ отправлено${link ? `: ${link}` : ''}`, undefined, item.telegram.messageId)
@@ -257,17 +284,42 @@ export class Orchestrator {
   /** Keeps the text until Ilya forces («Всё равно отправить» / «N да») or cancels. */
   private async holdForForce(item: Item, text: string, chosen: number | 'custom' | undefined, warning: string): Promise<void> {
     const { tg } = this.d
+    const { keyboard } = renderThreadChanged(item, [])
+    const wid = await tg.send(warning, keyboard, item.telegram.messageId)
+    // The new warning supersedes any older proposal or warning: their buttons must not send this text.
+    // The proposal id is kept so its outcome can still be written there; staleButton refuses it while a warning is live.
+    const { proposalMessageId, warningMessageId } = item.telegram
+    for (const id of [proposalMessageId, warningMessageId]) if (id !== undefined) await this.dropKeyboard(id)
     item.pendingText = text
     item.forceSend = true
     item.telegram.chosen = typeof chosen === 'number' ? chosen : undefined
-    const { keyboard } = renderThreadChanged(item, [])
-    tg.registerMessage(await tg.send(warning, keyboard, item.telegram.messageId), item.id)
+    item.telegram.warningMessageId = wid
+    tg.registerMessage(wid, item.id)
   }
 
   private clearHeld(item: Item): void {
     item.pendingText = undefined
     item.forceSend = undefined
     item.telegram.chosen = undefined
+  }
+
+  /** Strips the buttons of the item's proposal and warning messages (except `keep`) and forgets them. */
+  private async retireHeldButtons(item: Item, keep?: number): Promise<void> {
+    for (const key of ['proposalMessageId', 'warningMessageId'] as const) {
+      const id = item.telegram[key]
+      if (id === undefined) continue
+      if (id !== keep) await this.dropKeyboard(id)
+      item.telegram[key] = undefined
+    }
+  }
+
+  private async dropKeyboard(messageId: number): Promise<void> {
+    try {
+      await this.d.tg.dropKeyboard(messageId)
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('message is not modified')) return
+      log(`telegram keyboard removal failed: ${errName(err)}`)
+    }
   }
 
   private watch(item: Item, threadTs: string, sentTs: string): void {
@@ -335,6 +387,8 @@ export class Orchestrator {
   }
 
   private async edit(messageId: number, text: string, keyboard?: Keyboard): Promise<void> {
+    // Telegram rejects a longer edit outright; still make sure the old buttons go away.
+    if (text.length > TG_LIMIT) { if (!keyboard) await this.dropKeyboard(messageId); return }
     try {
       await this.d.tg.edit(messageId, text, keyboard)
     } catch (err) {

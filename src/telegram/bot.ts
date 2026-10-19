@@ -7,7 +7,8 @@ import type { Update, UserFromGetMe } from 'grammy/types'
 import { parseCallback, parseText, type Command } from '../commands'
 import { chunk, type Keyboard } from '../format'
 
-export type Inbound = { cmd: Command; messageId: number; quotedMessageId?: number }
+/** button: the command came from an inline button, and messageId is the message that carried it. */
+export type Inbound = { cmd: Command; messageId: number; quotedMessageId?: number; button?: true }
 
 type Opts = Record<string, unknown>
 export interface TelegramApi {
@@ -89,6 +90,11 @@ export class TelegramBot {
     await this.api.editMessageText(this.chatId, messageId, text, { reply_markup: markup(keyboard ?? []) })
   }
 
+  /** Removes a message's buttons and keeps its text. */
+  async dropKeyboard(messageId: number): Promise<void> {
+    await this.api.editMessageReplyMarkup(this.chatId, messageId, { reply_markup: markup([]) })
+  }
+
   /** Feed a raw Telegram update through the same handlers production polling uses. */
   async ingest(update: Update): Promise<void> {
     await this.bot.handleUpdate(update)
@@ -129,7 +135,7 @@ export class TelegramBot {
         this.log(`answerCallbackQuery failed: ${err instanceof Error ? err.name : 'unknown'}`) // stale query must not drop the command
       }
       if (!cmd || !q.message) return
-      await this.handler({ cmd, messageId: q.message.message_id })
+      await this.handler({ cmd, messageId: q.message.message_id, button: true })
     })
 
     this.bot.catch((err) => this.log(`handler error (polling continues): ${err.error instanceof Error ? err.error.name : 'unknown'}`))
