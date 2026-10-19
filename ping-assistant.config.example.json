@@ -1,0 +1,13 @@
+{
+  "userId": "U0XXXXXXX",
+  "watchChannels": ["C0XXXXXXX"],
+  "telegramChatId": "123456789",
+  "scentbirdRepoPath": "/Users/you/projects/scentbird",
+  "pollSeconds": 60,
+  "settleSeconds": 90,
+  "maxSettleSeconds": 300,
+  "followUpDays": 7,
+  "contextMessages": 30,
+  "dryRun": false,
+  "statePath": "~/.config/ping-assistant/state.json"
+}
