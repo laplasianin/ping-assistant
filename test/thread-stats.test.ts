@@ -93,3 +93,28 @@ test('stored agreements of the conversation are included, even for a short DM', 
   th.messages = [m(T, 'U2')]
   expect('agreements' in threadJson(th, stateWith(th), 'ME')!).toBe(false)
 })
+
+test('top-level channel item: unrelated channel history never triggers the block or counts in it', () => {
+  const top = (sec: number, user: string) => m(sec, user, undefined, { threadTs: undefined })
+  const history = Array.from({ length: 8 }, (_, i) => top(T + i, `U${10 + i}`))
+  const first = top(T + 100, 'U2')
+  const ch = item({ threadTs: undefined, context: history, messages: [first] })
+  expect(threadJson(ch, stateWith(ch), 'ME')).toBeUndefined()
+
+  const s = stateWith(ch)
+  s.threads[`C1:${first.ts}`] = { agreements: 'Открыто: срок', updatedAt: 1_000, itemId: '14' }
+  const t = threadJson(ch, s, 'ME')!
+  expect(t.messages).toBe(1)
+  expect(t.participants).toEqual([{ id: 'U2', name: 'U2', count: 1 }])
+  expect(t.agreements?.text).toBe('Открыто: срок')
+})
+
+test('top-level channel item with a prior item in its thread gets the block from its own thread only', () => {
+  const first = m(T + 100, 'U2', undefined, { threadTs: undefined })
+  const ch = item({ id: '20', seq: 20, threadTs: undefined, createdAt: 5_000, context: [m(T + 1, 'U9', undefined, { threadTs: undefined })], messages: [first] })
+  const earlier = item({ id: '19', seq: 19, threadTs: first.ts, status: 'sent', sentChoice: 1, createdAt: 1_000 })
+  const t = threadJson(ch, stateWith(earlier, ch), 'ME')!
+  expect(t.prior_items).toEqual([{ id: '19', status: 'sent', chosen: 1 }])
+  expect(t.messages).toBe(1)
+  expect(t.participants.map((p) => p.id)).toEqual(['U2'])
+})

@@ -53,14 +53,27 @@ function priorItems(item: Item, state: State): PriorItem[] {
 }
 
 /**
- * Thread stats for a thread item, one with a long context, or one whose conversation has stored agreements;
- * undefined for a short top-level conversation without them.
+ * Thread stats, or undefined when the item is not part of a real conversation worth summarising:
+ * - a thread item: always;
+ * - a top-level DM/MPIM item: when its context has ≥ THREAD_MIN_CONTEXT messages or agreements are stored;
+ * - a top-level channel item: only with prior items or stored agreements. Its context is unrelated channel
+ *   history, so its stats count only the thread under its first message, never that history.
  */
 export function threadJson(item: Item, state: State, userId: string): ThreadJson | undefined {
   const memory = state.threads[threadKey(item)]
-  if (item.threadTs === undefined && item.context.length < THREAD_MIN_CONTEXT && !memory) return undefined
+  const prior = priorItems(item, state)
+  let msgs = [...item.context, ...item.messages]
+  if (item.threadTs === undefined) {
+    if (isDm(item)) {
+      if (item.context.length < THREAD_MIN_CONTEXT && !memory) return undefined
+    } else {
+      if (!prior.length && !memory) return undefined
+      const root = item.messages[0]?.ts
+      msgs = msgs.filter((m) => m.ts === root || (root !== undefined && m.threadTs === root))
+    }
+  }
   const byTs = new Map<string, SlackMsg>()
-  for (const m of [...item.context, ...item.messages]) byTs.set(m.ts, m)
+  for (const m of msgs) byTs.set(m.ts, m)
   const all = [...byTs.values()].sort((a, b) => tsMs(a.ts) - tsMs(b.ts))
   if (!all.length) return undefined
   const counts = new Map<string, { id: string; name: string; count: number }>()
@@ -81,7 +94,7 @@ export function threadJson(item: Item, state: State, userId: string): ThreadJson
     first_at: iso(first),
     last_at: iso(last),
     days_span: Math.round(((last - first) / DAY_MS) * 10) / 10,
-    prior_items: priorItems(item, state),
+    prior_items: prior,
     ...(memory ? { agreements: { text: memory.agreements, updated_at: iso(memory.updatedAt), item_id: memory.itemId } } : {}),
   }
 }
