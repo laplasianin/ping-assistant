@@ -85,6 +85,7 @@ const baseCfg: Config = {
   userId: 'ME', watchChannels: ['C1'], telegramChatId: String(CHAT), pollSeconds: 3600, settleSeconds: 90,
   maxSettleSeconds: 300, followUpDays: 7, contextMessages: 30, triageTimeoutSeconds: 600, scentbirdRepoPath: '/tmp', dryRun: false,
   statePath: '/tmp/ping-assistant-test/state.json', drainSeconds: 5, socketReconcileTicks: 10,
+  feedbackReviewCron: { weekday: 1, hour: 9, minute: 30 },
 }
 
 let stderr: ReturnType<typeof spyOn>
@@ -1261,4 +1262,101 @@ test('prune never touches feedback, even for pruned items', async () => {
   await e.orch.tick()
   expect(state.items['1']).toBeUndefined()
   expect(state.feedback).toEqual([{ itemId: '1', at: T0 - 30 * DAY, note: 'old', source: 'im', channel: 'D1' }])
+})
+
+test('list_feedback lists recent entries compactly', async () => {
+  const e = await setup()
+  e.state.channels.C1 = 'pathfinders'
+  await matureThreadItem(e)
+  const sent = await propose(e, ['Первый вариант', 'Второй'])
+  await e.callback('pa:choose:1:2', sent.id)
+  await e.callback('pa:bad:1', sent.id)
+  await e.text('фидбек: не тот тон', e.api.last().id)
+  e.state.feedback.unshift({ itemId: '0', at: T0 - 10 * 86_400_000, note: 'старое', source: 'im', channel: 'D1' })
+  const call = async (args: Record<string, unknown>) => {
+    const res = await e.client.callTool({ name: 'list_feedback', arguments: args })
+    return (res.content as { text: string }[])[0]!.text
+  }
+  const out = await call({})
+  expect(out).toBe([
+    '#1 2026-10-19 #pathfinders chosen=2',
+    '  note: не тот тон',
+    '  analysis: Тип: технический',
+    '  variants: 1) Первый вариант | 2) Второй',
+  ].join('\n'))
+  expect(await call({ since_days: 30 })).toContain('#0 2026-10-09 #D1')
+  e.state.feedback = []
+  expect(await call({})).toBe('фидбека нет')
+})
+
+/** Local-time epoch ms, as the review schedule uses the system time zone. */
+const local = (y: number, mo: number, d: number, h: number, mi: number) => new Date(y, mo, d, h, mi).getTime()
+
+test('weekly feedback review fires once at the configured moment with the last 7 days, then waits a week', async () => {
+  const e = await setup()
+  // T0 is Monday 2026-10-19; the first tick only arms the schedule.
+  await e.orch.tick()
+  expect(e.state.lastFeedbackReviewAt).toBe(T0)
+  e.state.feedback.push(
+    { itemId: '5', at: T0, note: 'длинно', analysis: 'Тип: org', variants: ['a'], chosen: 1, source: 'im', channel: 'личка' },
+    { itemId: '4', at: T0 - 8 * 86_400_000, source: 'im', channel: 'личка' }, // older than 7 days at review time
+  )
+  const moment = local(2026, 9, 26, 9, 30)
+  e.advance(moment - 60_000 - T0)
+  await e.orch.tick()
+  await e.flush()
+  expect(e.notes.filter((n) => n.meta.kind === 'feedback-review')).toEqual([])
+
+  e.advance(2 * 60_000)
+  await e.orch.tick()
+  await e.flush()
+  const reviews = e.notes.filter((n) => n.meta.kind === 'feedback-review')
+  expect(reviews).toHaveLength(1)
+  expect(reviews[0]!.meta).toEqual({ kind: 'feedback-review', source: 'ping-assistant' })
+  const body = JSON.parse(reviews[0]!.content)
+  expect(body.since).toBe(new Date(moment + 60_000 - 7 * 86_400_000).toISOString())
+  expect(body.entries).toEqual([
+    { itemId: '5', at: new Date(T0).toISOString(), note: 'длинно', analysis: 'Тип: org', variants: ['a'], chosen: 1, source: 'im', channel: 'личка' },
+  ])
+  expect(e.state.lastFeedbackReviewAt).toBe(moment + 60_000)
+
+  e.advance(60_000)
+  await e.orch.tick()
+  e.advance(3 * 86_400_000)
+  await e.orch.tick()
+  await e.flush()
+  expect(e.notes.filter((n) => n.meta.kind === 'feedback-review')).toHaveLength(1)
+
+  // Next Monday: nothing in the last 7 days, so no review, but the week is consumed.
+  const next = local(2026, 10, 2, 9, 30)
+  e.advance(next + 60_000 - (moment + 2 * 60_000 + 3 * 86_400_000))
+  await e.orch.tick()
+  await e.flush()
+  expect(e.notes.filter((n) => n.meta.kind === 'feedback-review')).toHaveLength(1)
+  expect(e.state.lastFeedbackReviewAt).toBe(next + 60_000)
+
+  // A 👎 on Tuesday does not trigger a late review: it waits for the following Monday.
+  e.advance(86_400_000)
+  e.state.feedback.push({ itemId: '6', at: next + 60_000 + 86_400_000, source: 'im', channel: 'личка' })
+  await e.orch.tick()
+  await e.flush()
+  expect(e.notes.filter((n) => n.meta.kind === 'feedback-review')).toHaveLength(1)
+  const third = local(2026, 10, 9, 9, 30)
+  e.advance(third - (next + 60_000 + 86_400_000))
+  await e.orch.tick()
+  await e.flush()
+  expect(e.notes.filter((n) => n.meta.kind === 'feedback-review')).toHaveLength(2)
+})
+
+test('a review moment missed while asleep fires on the first tick after it', async () => {
+  const state = emptyState()
+  state.lastFeedbackReviewAt = local(2026, 9, 12, 9, 31) // the previous Monday's review ran
+  state.feedback.push({ itemId: '1', at: T0 - 86_400_000, source: 'im', channel: 'личка' })
+  const e = await setup({}, state)
+  const wake = local(2026, 9, 19, 12, 0) // Monday, after 09:30 local
+  e.advance(wake - T0)
+  await e.orch.tick()
+  await e.flush()
+  expect(e.notes.filter((n) => n.meta.kind === 'feedback-review')).toHaveLength(1)
+  expect(state.lastFeedbackReviewAt).toBe(wake)
 })

@@ -13,5 +13,6 @@
   "triageTimeoutSeconds": 600,
   "dryRun": false,
   "selfDmTest": false,
+  "feedbackReviewCron": { "weekday": 1, "hour": 9, "minute": 30 },
   "statePath": "~/.config/ping-assistant/state.json"
 }

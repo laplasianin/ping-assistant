@@ -18,6 +18,7 @@ function fakeHandlers(calls: Call[], overrides: Partial<ChannelHandlers> = {}): 
     listItems: rec('listItems'),
     listIgnored: rec('listIgnored'),
     say: rec('say'),
+    listFeedback: rec('listFeedback'),
     ...overrides,
   }
 }
@@ -37,10 +38,10 @@ function text(res: Awaited<ReturnType<Client['callTool']>>): string {
   return content.map(c => c.text).join('')
 }
 
-test('lists exactly six tools: propose, ignore, close, list_items, list_ignored, say', async () => {
+test('lists exactly seven tools: propose, ignore, close, list_items, list_ignored, list_feedback, say', async () => {
   const { client } = await setup()
   const { tools } = await client.listTools()
-  expect(tools.map(t => t.name).sort()).toEqual(['close', 'ignore', 'list_ignored', 'list_items', 'propose', 'say'])
+  expect(tools.map(t => t.name).sort()).toEqual(['close', 'ignore', 'list_feedback', 'list_ignored', 'list_items', 'propose', 'say'])
   expect(tools.some(t => /slack|send|post/i.test(t.name))).toBe(false)
 })
 
@@ -83,6 +84,14 @@ test('propose passes arguments to the handler and returns its text', async () =>
   expect(res.isError).toBeFalsy()
   expect(text(res)).toBe('propose ok')
   expect(calls).toEqual([{ method: 'propose', args: ['14', 'why', ['a', 'b'], 'variants'] }])
+})
+
+test('routes list_feedback with since_days defaulting to 7', async () => {
+  const { client, calls } = await setup()
+  await client.callTool({ name: 'list_feedback', arguments: {} })
+  await client.callTool({ name: 'list_feedback', arguments: { since_days: 30 } })
+  expect((await client.callTool({ name: 'list_feedback', arguments: { since_days: -1 } })).isError).toBe(true)
+  expect(calls).toEqual([{ method: 'listFeedback', args: [7] }, { method: 'listFeedback', args: [30] }])
 })
 
 test('routes ignore, close, list_items, list_ignored and say to handlers', async () => {

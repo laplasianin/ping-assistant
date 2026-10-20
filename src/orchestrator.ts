@@ -2,7 +2,7 @@
 // Invariant: only sendToSlack calls slack.postMessage, and only on Ilya's command from Telegram.
 import type { Channel, ChannelHandlers } from './channel'
 import { callbackData, type Command } from './commands'
-import type { Config } from './config'
+import type { Config, ReviewCron } from './config'
 import { escapeHtml, outcome, renderItem, renderProposal, renderThreadChanged, renderUpdate, slackify, type Keyboard } from './format'
 import { ItemMessages, itemJson, lastPart, msgJson, withoutHint } from './item-messages'
 import { ingest, mature, prune } from './items'
@@ -31,6 +31,19 @@ const PRUNE_MS = 3_600_000
 const log = (kind: string): void => { process.stderr.write(`ping-assistant: ${kind}\n`) }
 const errName = (err: unknown): string => (err instanceof Error ? err.name : 'unknown')
 const isDm = (item: Item): boolean => item.source === 'im' || item.source === 'mpim'
+/** The feedback review covers this much history. */
+const REVIEW_WINDOW_MS = 7 * DAY_MS
+const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim()
+
+/** The latest scheduled review moment at or before now, in local time (DST-safe: built from local fields). */
+export function lastReviewMoment(now: number, cron: ReviewCron): number {
+  const d = new Date(now)
+  d.setDate(d.getDate() - ((d.getDay() - cron.weekday + 7) % 7))
+  d.setHours(cron.hour, cron.minute, 0, 0)
+  if (d.getTime() > now) { d.setDate(d.getDate() - 7); d.setHours(cron.hour, cron.minute, 0, 0) }
+  return d.getTime()
+}
+
 export class Orchestrator {
   private readonly now: () => number
   private timer: ReturnType<typeof setInterval> | undefined
@@ -125,6 +138,7 @@ export class Orchestrator {
         this.lastPrune = now
         if (prune(state, now, cfg)) dirty = true
       }
+      if (await this.feedbackReview(now)) dirty = true
     } catch (err) {
       dirty = true
       log(`tick failed: ${errName(err)}`)
@@ -183,6 +197,18 @@ export class Orchestrator {
         const items = this.sorted().filter((i) => i.status === 'ignored' && i.createdAt >= since)
         if (!items.length) return 'ничего не проигнорировано'
         return items.map((i) => `#${i.id} #${this.channelName(i)} ${this.authorName(i)} — ${i.ignoreReason ?? ''}`).join('\n')
+      },
+      listFeedback: async (sinceDays) => {
+        const since = this.now() - sinceDays * DAY_MS
+        const entries = this.d.state.feedback.filter((f) => f.at >= since)
+        if (!entries.length) return 'фидбека нет'
+        return entries.map((f) => {
+          const lines = [`#${f.itemId} ${new Date(f.at).toISOString().slice(0, 10)} #${f.channel}${f.chosen !== undefined ? ` chosen=${f.chosen}` : ''}`]
+          if (f.note) lines.push(`  note: ${oneLine(f.note)}`)
+          if (f.analysis) lines.push(`  analysis: ${oneLine(f.analysis).slice(0, 120)}`)
+          if (f.variants?.length) lines.push(`  variants: ${f.variants.map((v, i) => `${i + 1}) ${oneLine(v)}`).join(' | ')}`)
+          return lines.join('\n')
+        }).join('\n')
       },
       say: async (text) => {
         await tg.send(text, undefined, undefined, { plain: true }) // free text from the session: a stray < must not break it
@@ -447,6 +473,30 @@ export class Orchestrator {
       tg.registerMessage(id, item.id)
     }
     await this.d.channel.notify(JSON.stringify({ id: item.id, newMessages: [msgJson(msg)] }), { kind: 'update', item_id: item.id })
+  }
+
+  /**
+   * Once the weekly review moment has passed since the last review, hands the last 7 days of feedback to the
+   * session (kind feedback-review). A week without feedback is consumed silently, so a 👎 on Tuesday waits for
+   * the next moment instead of triggering a late review. The first check only arms the schedule.
+   */
+  private async feedbackReview(now: number): Promise<boolean> {
+    const { state, cfg } = this.d
+    if (state.lastFeedbackReviewAt === undefined) { state.lastFeedbackReviewAt = now; return true }
+    if (state.lastFeedbackReviewAt >= lastReviewMoment(now, cfg.feedbackReviewCron)) return false
+    const since = now - REVIEW_WINDOW_MS
+    const entries = state.feedback.filter((f) => f.at >= since).map((f) => ({ ...f, at: new Date(f.at).toISOString() }))
+    if (entries.length) {
+      try {
+        await this.d.channel.notify(JSON.stringify({ since: new Date(since).toISOString(), entries }), { kind: 'feedback-review' })
+      } catch (err) {
+        log(`notify feedback-review failed: ${errName(err)}`) // retried on the next tick
+        return false
+      }
+      log('feedback review sent')
+    }
+    state.lastFeedbackReviewAt = now
+    return true
   }
 
   /** Items the session has not answered for triageTimeoutSeconds: remind Ilya once and nudge the session again. */

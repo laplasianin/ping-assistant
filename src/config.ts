@@ -9,7 +9,10 @@ export type Config = {
   followUpDays: number; contextMessages: number; scentbirdRepoPath: string; triageTimeoutSeconds: number;
   dryRun: boolean; selfDmTest?: boolean; statePath: string;
   drainSeconds: number; socketReconcileTicks: number;
+  /** Weekly feedback review, local time (system TZ): weekday 0 = Sunday … 6 = Saturday. */
+  feedbackReviewCron: ReviewCron;
 }
+export type ReviewCron = { weekday: number; hour: number; minute: number }
 
 function expandHome(p: string): string {
   if (p === '~') return homedir()
@@ -33,6 +36,11 @@ const ConfigSchema = z.object({
   statePath: z.string().default('~/.config/ping-assistant/state.json'),
   drainSeconds: z.number().min(1).default(5),
   socketReconcileTicks: z.number().int().positive().default(10),
+  feedbackReviewCron: z.object({
+    weekday: z.number().int().min(0).max(6),
+    hour: z.number().int().min(0).max(23),
+    minute: z.number().int().min(0).max(59),
+  }).default({ weekday: 1, hour: 9, minute: 30 }),
 })
 
 export function loadConfig(path = 'ping-assistant.config.json'): Config {

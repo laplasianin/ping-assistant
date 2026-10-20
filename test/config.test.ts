@@ -42,6 +42,7 @@ test('loadConfig applies defaults', () => {
   expect(cfg.drainSeconds).toBe(5)
   expect(cfg.socketReconcileTicks).toBe(10)
   expect(cfg.dryRun).toBe(false)
+  expect(cfg.feedbackReviewCron).toEqual({ weekday: 1, hour: 9, minute: 30 })
   expect(cfg.statePath).toBe(join(homedir(), '.config/ping-assistant/state.json'))
 })
 
@@ -133,4 +134,11 @@ test('loadConfig: malformed JSON names the path and the parse error', () => {
   try { loadConfig(p) } catch (err) { msg = (err as Error).message }
   expect(msg).toStartWith(`Invalid config ${p}: malformed JSON (`)
   expect(msg.length).toBeGreaterThan(`Invalid config ${p}: malformed JSON (`.length + 2)
+})
+
+test('feedbackReviewCron accepts an explicit moment and rejects an impossible one', () => {
+  expect(loadConfig(writeJson({ ...base, feedbackReviewCron: { weekday: 5, hour: 17, minute: 0 } })).feedbackReviewCron)
+    .toEqual({ weekday: 5, hour: 17, minute: 0 })
+  expect(() => loadConfig(writeJson({ ...base, feedbackReviewCron: { weekday: 7, hour: 9, minute: 30 } }))).toThrow(/feedbackReviewCron/)
+  expect(() => loadConfig(writeJson({ ...base, feedbackReviewCron: { weekday: 1, hour: 24, minute: 0 } }))).toThrow(/feedbackReviewCron/)
 })

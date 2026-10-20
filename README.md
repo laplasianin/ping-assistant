@@ -89,6 +89,7 @@ cp ping-assistant.config.example.json ping-assistant.config.json
 | `contextMessages` | сколько сообщений контекста подтягивать к айтему (30) |
 | `triageTimeoutSeconds` | через сколько секунд без разбора прислать «⏳ #N без разбора» и разбудить сессию ещё раз (600) |
 | `dryRun` | `true`: ничего не отправляется в Slack, в Telegram приходит «🧪 dry-run, отправил бы …» |
+| `feedbackReviewCron` | когда присылать сессии недельный разбор фидбека: `{ "weekday": 1, "hour": 9, "minute": 30 }` — понедельник 09:30 по системной таймзоне (`weekday`: 0 = воскресенье … 6 = суббота). Если за 7 дней фидбека нет, разбора нет |
 | `selfDmTest` | только вместе с `dryRun: true`: сообщения в личке с самим собой считаются чужими, чтобы тестировать без коллег (`false`) |
 | `statePath` | файл состояния (`~/.config/ping-assistant/state.json`) |
 
@@ -301,7 +302,7 @@ Slack читается по-настоящему, отправки нет.
 1. Slack-приложение, бот, секреты и конфиг по инструкциям выше, `"dryRun": true`.
 2. **Смоук без Claude.** `bun run scripts/smoke-check.ts` поднимает `src/main.ts` по stdio и
    ожидает в выводе `started (dry-run)`, `claude/channel capability: yes`, список инструментов
-   `propose, ignore, close, list_items, list_ignored, say` и `ok`. В Telegram смоук ничего не шлёт.
+   `propose, ignore, close, list_items, list_ignored, list_feedback, say` и `ok`. В Telegram смоук ничего не шлёт.
 3. **Сессия.** `bin/ping-assistant-up`.
 4. **Сценарий.** Попросить коллегу написать в личку два сообщения подряд. Ожидается:
    - через `settleSeconds` после последнего — **одно** сообщение в Telegram: шапка
