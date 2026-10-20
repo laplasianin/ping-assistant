@@ -197,6 +197,53 @@ bin/ping-assistant-session --detached  # только убедиться, что
 
 Закрытие окна Terminal только отсоединяет клиент: сессия tmux и Claude продолжают работать.
 
+### Автозапуск при входе (launchd)
+
+Шаблоны лежат в `launchd/`. Пути в них прописаны под эту машину (`/Users/ilebedyuk/projects/ping-assistant`,
+`/Users/ilebedyuk/.bun/bin/bun`, PATH с `/opt/homebrew/bin`); на другой машине их нужно отредактировать
+до копирования.
+
+- `com.ping-assistant.session.plist` запускает `bin/ping-assistant-session --detached` при входе и каждые
+  300 секунд (не KeepAlive: сессию держит tmux, а перезапуск по интервалу поднимает её после падения).
+  Лог: `~/Library/Logs/ping-assistant/session.log`.
+- `com.ping-assistant.watchdog.plist` каждые 300 секунд запускает `bun run scripts/watchdog.ts`.
+  Лог: `~/Library/Logs/ping-assistant/watchdog.log`.
+
+Установка:
+
+```bash
+mkdir -p ~/Library/Logs/ping-assistant
+cp launchd/*.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ping-assistant.session.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ping-assistant.watchdog.plist
+```
+
+Остановка и удаление:
+
+```bash
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.ping-assistant.session.plist
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.ping-assistant.watchdog.plist
+rm ~/Library/LaunchAgents/com.ping-assistant.*.plist
+tmux kill-session -t ping-assistant   # остановить саму сессию
+```
+
+Посмотреть на сессию: `bin/ping-assistant-session` или иконка `Ping Assistant.command`.
+
+### Watchdog
+
+`scripts/watchdog.ts` проверяет, что процесс `bun run src/main.ts` этого репозитория запущен. Если нет,
+шлёт в Telegram (`TELEGRAM_BOT_TOKEN` из `~/.config/ping-assistant/.env`, `telegramChatId` из конфига)
+«⚠️ Ping Assistant не запущен. Открой «Ping Assistant.command» или запусти bin/ping-assistant-session»,
+не чаще раза в 60 минут. Когда сервер вернулся, один раз шлёт «✅ Ping Assistant снова работает».
+Состояние хранится в `~/.config/ping-assistant/watchdog.json`; если отправка не удалась, оно не меняется и
+следующий запуск повторит попытку. Токены и тексты сообщений не логируются, код выхода всегда 0.
+
+### Ноутбук не должен засыпать
+
+`caffeinate -i` уже есть в `bin/ping-assistant-up` и не даёт системе уснуть от простоя. Но с закрытой
+крышкой Mac всё равно уснёт, если нет питания и внешнего дисплея, и тогда сервер молчит (watchdog тоже:
+он спит вместе с машиной). Держи крышку открытой или работай от сети с внешним монитором.
+
 ## Команды в Telegram
 
 Айтемы нумеруются: `#14`, follow-up в том же треде — `#14.1`, `#14.2`.
