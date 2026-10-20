@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import { Bot, GrammyError } from 'grammy'
 import type { Update, UserFromGetMe } from 'grammy/types'
 import { parseCallback, parseText, type Command } from '../commands'
-import { chunk, type Keyboard } from '../format'
+import { chunk, stripHtml, type Keyboard } from '../format'
 
 /** button: the command came from an inline button, and messageId is the message that carried it. */
 export type Inbound = { cmd: Command; messageId: number; quotedMessageId?: number; button?: true }
@@ -38,6 +38,12 @@ const markup = (kb: Keyboard) => ({
 })
 
 const defaultLog = (kind: string): void => { process.stderr.write(`telegram: ${kind}\n`) }
+
+/** Telegram refused the HTML markup (a stray tag or entity): the text itself is fine as plain text. */
+const htmlRejected = (err: unknown): boolean => {
+  const what = err instanceof GrammyError ? err.description : err instanceof Error ? err.message : ''
+  return what.includes("can't parse entities")
+}
 
 export class TelegramBot {
   private readonly bot: Bot
@@ -75,21 +81,37 @@ export class TelegramBot {
     return this.items.get(quotedMessageId)
   }
 
-  async send(text: string, keyboard?: Keyboard, replyTo?: number): Promise<number> {
-    const parts = chunk(text)
+  /** Sends HTML (parse_mode HTML) split into Telegram-sized messages; `plain` sends the text as is, unparsed. */
+  async send(text: string, keyboard?: Keyboard, replyTo?: number, { plain = false }: { plain?: boolean } = {}): Promise<number> {
+    const parts = chunk(text, 4096, !plain)
     let last = 0
     for (const [i, part] of parts.entries()) {
       const opts: Opts = {}
       if (i === 0 && replyTo !== undefined) opts.reply_parameters = { message_id: replyTo }
       if (i === parts.length - 1 && keyboard) opts.reply_markup = markup(keyboard)
-      last = (await this.api.sendMessage(this.chatId, part, opts)).message_id
+      last = plain
+        ? (await this.api.sendMessage(this.chatId, part, opts)).message_id
+        : (await this.html(part, (t, mode) => this.api.sendMessage(this.chatId, t, { ...mode, ...opts }))).message_id
     }
     return last
   }
 
   async edit(messageId: number, text: string, keyboard?: Keyboard): Promise<void> {
     // An explicit empty keyboard is the documented way to drop the buttons.
-    await this.api.editMessageText(this.chatId, messageId, text, { reply_markup: markup(keyboard ?? []) })
+    const reply_markup = markup(keyboard ?? [])
+    await this.html(text, (t, mode) => this.api.editMessageText(this.chatId, messageId, t, { ...mode, reply_markup }))
+  }
+
+  /** Calls with parse_mode HTML; if Telegram cannot parse the markup, retries once with the tags stripped and no parse_mode. */
+  private async html<T>(text: string, call: (text: string, mode: Opts) => Promise<T>): Promise<T> {
+    try {
+      return await call(text, { parse_mode: 'HTML' })
+    } catch (err) {
+      if (!htmlRejected(err)) throw err
+      const res = await call(stripHtml(text), {})
+      this.log('html rejected, sent plain')
+      return res
+    }
   }
 
   /** Removes a message's buttons and keeps its text. */

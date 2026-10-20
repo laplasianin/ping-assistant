@@ -185,7 +185,7 @@ export class Orchestrator {
         return items.map((i) => `#${i.id} #${this.channelName(i)} ${this.authorName(i)} — ${i.ignoreReason ?? ''}`).join('\n')
       },
       say: async (text) => {
-        await tg.send(text)
+        await tg.send(text, undefined, undefined, { plain: true }) // free text from the session: a stray < must not break it
         return 'sent to Telegram'
       },
     }

@@ -111,8 +111,8 @@ test('edit without keyboard removes reply_markup', async () => {
   await bot.edit(5, 'done')
   await bot.edit(6, 'again', [[{ label: 'X', data: 'pa:cancel:1' }]])
   const edits = api.of('editMessageText')
-  expect(edits[0]?.args).toEqual([CHAT, 5, 'done', { reply_markup: { inline_keyboard: [] } }])
-  expect(edits[1]?.args).toEqual([CHAT, 6, 'again', { reply_markup: { inline_keyboard: [[{ text: 'X', callback_data: 'pa:cancel:1' }]] } }])
+  expect(edits[0]?.args).toEqual([CHAT, 5, 'done', { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } }])
+  expect(edits[1]?.args).toEqual([CHAT, 6, 'again', { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: 'X', callback_data: 'pa:cancel:1' }]] } }])
 })
 
 test('dropKeyboard edits only the reply markup', async () => {
@@ -233,4 +233,49 @@ test('polling diagnostics go to the injected logger', async () => {
   const { bot, logs } = setup({ startPolling: async (onStart) => { onStart() }, sleep: async () => {} })
   await bot.poll()
   expect(logs).toEqual(['polling'])
+})
+
+const cantParse = () => new GrammyError('x', { ok: false, error_code: 400, description: "Bad Request: can't parse entities: Unsupported start tag \"foo\" at byte offset 3" }, 'sendMessage', {})
+
+test('send uses HTML parse mode; plain sends have none', async () => {
+  const { bot, api } = setup()
+  await bot.send('<b>#1</b> a &amp; b')
+  await bot.send('a <b c', undefined, undefined, { plain: true })
+  const sends = api.of('sendMessage')
+  expect(sends[0]?.args).toEqual([CHAT, '<b>#1</b> a &amp; b', { parse_mode: 'HTML' }])
+  expect(sends[1]?.args).toEqual([CHAT, 'a <b c', {}])
+})
+
+test('rejected HTML is resent once as plain text, without parse_mode, and logged without the text', async () => {
+  const { bot, api, logs } = setup()
+  const real = api.sendMessage.bind(api)
+  let first = true
+  api.sendMessage = async (...args) => {
+    if (first) { first = false; api.calls.push({ method: 'rejected', args }); throw cantParse() }
+    return real(...args)
+  }
+  const id = await bot.send('<b>#1</b> x &lt; y', [[{ label: 'Skip', data: 'pa:skip:1' }]], 9)
+  expect(id).toBe(100)
+  const sends = api.of('sendMessage')
+  expect(sends).toHaveLength(1)
+  expect(sends[0]?.args).toEqual([CHAT, '#1 x < y', {
+    reply_parameters: { message_id: 9 }, reply_markup: { inline_keyboard: [[{ text: 'Skip', callback_data: 'pa:skip:1' }]] },
+  }])
+  expect(logs).toEqual(['html rejected, sent plain'])
+})
+
+test('edit falls back to plain text on a parse error; other errors propagate', async () => {
+  const { bot, api, logs } = setup()
+  const real = api.editMessageText.bind(api)
+  let calls = 0
+  api.editMessageText = async (...args) => {
+    if (++calls === 1) throw cantParse()
+    return real(...args)
+  }
+  await bot.edit(5, '<i>done</i> &amp;')
+  expect(api.of('editMessageText').map((c) => c.args)).toEqual([[CHAT, 5, 'done &', { reply_markup: { inline_keyboard: [] } }]])
+  expect(logs).toEqual(['html rejected, sent plain'])
+  api.editMessageText = async () => { throw new Error('Bad Request: message is not modified') }
+  await expect(bot.edit(5, 'x')).rejects.toThrow('message is not modified')
+  expect(logs).toHaveLength(1)
 })

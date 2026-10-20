@@ -398,6 +398,23 @@ test('appended message is quoted in telegram and notified as kind=update', async
   expect(JSON.parse(e.notes[0]!.content)).toMatchObject({ id: '1', newMessages: [{ ts: '111.000000', text: 'и ещё вопрос' }] })
 })
 
+test('say goes to Telegram as plain text, with no parse_mode', async () => {
+  const e = await setup()
+  const res = await e.client.callTool({ name: 'say', arguments: { text: 'if a < b && c > d' } })
+  expect(res.isError).toBeFalsy()
+  expect(e.api.last().text).toBe('if a < b && c > d')
+  expect(e.api.last().opts.parse_mode).toBeUndefined()
+})
+
+test('item messages and outcome edits go out with parse_mode HTML', async () => {
+  const e = await setup()
+  await matureThreadItem(e)
+  const sent = await propose(e, ['a', 'b'])
+  expect(sent.opts.parse_mode).toBe('HTML')
+  await e.callback('pa:skip:1', sent.id)
+  expect(e.api.lastEdit(sent.id)!.opts.parse_mode).toBe('HTML')
+})
+
 test('ignore, list_items and list_ignored', async () => {
   const e = await setup()
   await matureThreadItem(e)
