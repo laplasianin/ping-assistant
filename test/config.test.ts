@@ -15,8 +15,10 @@ afterEach(() => {
   delete process.env.SLACK_USER_TOKEN
   delete process.env.TELEGRAM_BOT_TOKEN
   delete process.env.SLACK_APP_TOKEN
+  delete process.env.JIRA_EMAIL
+  delete process.env.JIRA_API_TOKEN
 })
-beforeEach(() => { delete process.env.SLACK_APP_TOKEN })
+beforeEach(() => { for (const k of ['SLACK_APP_TOKEN', 'JIRA_EMAIL', 'JIRA_API_TOKEN']) delete process.env[k] })
 
 function writeJson(obj: unknown): string {
   const p = join(tmp(), 'config.json')
@@ -43,6 +45,8 @@ test('loadConfig applies defaults', () => {
   expect(cfg.socketReconcileTicks).toBe(10)
   expect(cfg.dryRun).toBe(false)
   expect(cfg.feedbackReviewCron).toEqual({ weekday: 1, hour: 9, minute: 30 })
+  expect(cfg.github).toEqual({ defaultRepo: 'scentbird/scentbird' })
+  expect(cfg.jira).toEqual({ site: 'scentbird.atlassian.net' })
   expect(cfg.statePath).toBe(join(homedir(), '.config/ping-assistant/state.json'))
 })
 
@@ -141,4 +145,19 @@ test('feedbackReviewCron accepts an explicit moment and rejects an impossible on
     .toEqual({ weekday: 5, hour: 17, minute: 0 })
   expect(() => loadConfig(writeJson({ ...base, feedbackReviewCron: { weekday: 7, hour: 9, minute: 30 } }))).toThrow(/feedbackReviewCron/)
   expect(() => loadConfig(writeJson({ ...base, feedbackReviewCron: { weekday: 1, hour: 24, minute: 0 } }))).toThrow(/feedbackReviewCron/)
+})
+
+test('loadConfig keeps github.defaultRepo and jira.site, and rejects a malformed repo', () => {
+  const cfg = loadConfig(writeJson({ ...base, github: { defaultRepo: 'acme/tool' }, jira: { site: 'acme.atlassian.net' } }))
+  expect(cfg.github.defaultRepo).toBe('acme/tool')
+  expect(cfg.jira.site).toBe('acme.atlassian.net')
+  expect(() => loadConfig(writeJson({ ...base, github: { defaultRepo: 'nope' } }))).toThrow(/github.defaultRepo/)
+})
+
+test('loadSecrets: Jira credentials are optional and returned only as a pair', () => {
+  const p = join(tmp(), '.env')
+  writeFileSync(p, 'SLACK_USER_TOKEN=s\nTELEGRAM_BOT_TOKEN=t\nJIRA_EMAIL=me@x\n')
+  expect(loadSecrets(p)).toEqual({ slackToken: 's', telegramToken: 't' })
+  writeFileSync(p, 'SLACK_USER_TOKEN=s\nTELEGRAM_BOT_TOKEN=t\nJIRA_EMAIL=me@x\nJIRA_API_TOKEN=jt\n')
+  expect(loadSecrets(p)).toEqual({ slackToken: 's', telegramToken: 't', jiraEmail: 'me@x', jiraApiToken: 'jt' })
 })

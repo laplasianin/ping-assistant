@@ -85,7 +85,7 @@ const baseCfg: Config = {
   userId: 'ME', watchChannels: ['C1'], telegramChatId: String(CHAT), pollSeconds: 3600, settleSeconds: 90,
   maxSettleSeconds: 300, followUpDays: 7, contextMessages: 30, triageTimeoutSeconds: 600, scentbirdRepoPath: '/tmp', dryRun: false,
   statePath: '/tmp/ping-assistant-test/state.json', drainSeconds: 5, socketReconcileTicks: 10,
-  feedbackReviewCron: { weekday: 1, hour: 9, minute: 30 },
+  feedbackReviewCron: { weekday: 1, hour: 9, minute: 30 }, github: { defaultRepo: 'scentbird/scentbird' }, jira: { site: 'scentbird.atlassian.net' },
 }
 
 let stderr: ReturnType<typeof spyOn>

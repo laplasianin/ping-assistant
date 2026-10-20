@@ -11,6 +11,8 @@ export type Config = {
   drainSeconds: number; socketReconcileTicks: number;
   /** Weekly feedback review, local time (system TZ): weekday 0 = Sunday … 6 = Saturday. */
   feedbackReviewCron: ReviewCron;
+  /** References enrichment: bare «PR #123» numbers resolve to defaultRepo (owner/repo); Jira keys link to jira.site. */
+  github: { defaultRepo: string }; jira: { site: string };
 }
 export type ReviewCron = { weekday: number; hour: number; minute: number }
 
@@ -41,6 +43,8 @@ const ConfigSchema = z.object({
     hour: z.number().int().min(0).max(23),
     minute: z.number().int().min(0).max(59),
   }).default({ weekday: 1, hour: 9, minute: 30 }),
+  github: z.object({ defaultRepo: z.string().regex(/^[\w.-]+\/[\w.-]+$/, 'must be owner/repo') }).default({ defaultRepo: 'scentbird/scentbird' }),
+  jira: z.object({ site: z.string().regex(/^[\w.-]+$/, 'must be a host name') }).default({ site: 'scentbird.atlassian.net' }),
 })
 
 export function loadConfig(path = 'ping-assistant.config.json'): Config {
@@ -89,14 +93,25 @@ function parseEnvFile(path: string): Record<string, string> {
   return out
 }
 
-/** slackAppToken (`xapp-…`, Socket Mode) is optional: without it the server polls only. */
-export function loadSecrets(envPath = '~/.config/ping-assistant/.env'): { slackToken: string; telegramToken: string; slackAppToken?: string } {
+export type Secrets = { slackToken: string; telegramToken: string; slackAppToken?: string; jiraEmail?: string; jiraApiToken?: string }
+
+/**
+ * slackAppToken (`xapp-…`, Socket Mode) is optional: without it the server polls only.
+ * JIRA_EMAIL + JIRA_API_TOKEN are optional too: without both, Jira keys are left to the session's Atlassian MCP.
+ */
+export function loadSecrets(envPath = '~/.config/ping-assistant/.env'): Secrets {
   const file = parseEnvFile(expandHome(envPath))
   const get = (key: string): string => {
     const v = process.env[key] || file[key]
     if (!v) throw new Error(`Missing secret ${key} (set it in the environment or in ${envPath})`)
     return v
   }
-  const slackAppToken = process.env.SLACK_APP_TOKEN || file.SLACK_APP_TOKEN
-  return { slackToken: get('SLACK_USER_TOKEN'), telegramToken: get('TELEGRAM_BOT_TOKEN'), ...(slackAppToken ? { slackAppToken } : {}) }
+  const optional = (key: string): string | undefined => process.env[key] || file[key] || undefined
+  const slackAppToken = optional('SLACK_APP_TOKEN')
+  const jiraEmail = optional('JIRA_EMAIL')
+  const jiraApiToken = optional('JIRA_API_TOKEN')
+  return {
+    slackToken: get('SLACK_USER_TOKEN'), telegramToken: get('TELEGRAM_BOT_TOKEN'), ...(slackAppToken ? { slackAppToken } : {}),
+    ...(jiraEmail && jiraApiToken ? { jiraEmail, jiraApiToken } : {}),
+  }
 }

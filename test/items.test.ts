@@ -10,7 +10,7 @@ const cfg: Config = {
   userId: 'UILYA', watchChannels: [], telegramChatId: '1', pollSeconds: 60,
   settleSeconds: 90, maxSettleSeconds: 300, followUpDays: 7, contextMessages: 30, triageTimeoutSeconds: 600,
   scentbirdRepoPath: '/x', dryRun: false, statePath: '/x/state.json', drainSeconds: 5, socketReconcileTicks: 10,
-  feedbackReviewCron: { weekday: 1, hour: 9, minute: 30 },
+  feedbackReviewCron: { weekday: 1, hour: 9, minute: 30 }, github: { defaultRepo: 'scentbird/scentbird' }, jira: { site: 'scentbird.atlassian.net' },
 }
 const T0 = 1_760_800_000_000
 let n = 0
