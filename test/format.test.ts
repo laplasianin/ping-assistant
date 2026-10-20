@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { chunk, humanizeSlack, outcome, renderItem, renderProposal, renderThreadChanged, renderUpdate, slackify } from '../src/format'
+import { chunk, escapeHtml, humanizeSlack, outcome, renderItem, renderProposal, renderThreadChanged, renderUpdate, slackify, slackToHtml, stripHtml } from '../src/format'
 import type { Item, SlackMsg } from '../src/state'
 
 const NOW = 1_760_800_000_000
@@ -97,5 +97,41 @@ describe('chunk', () => {
     expect(parts).toEqual(['x', 'y'.repeat(10), 'y'.repeat(10), 'yyyyy\n\nz'])
     expect(parts.every((p) => p.length <= 10)).toBe(true)
     expect(chunk('short').length).toBe(1)
+  })
+})
+
+describe('escapeHtml / stripHtml', () => {
+  test('escapes &, <, > and strips back to plain text', () => {
+    expect(escapeHtml('a & b <c> d')).toBe('a &amp; b &lt;c&gt; d')
+    expect(stripHtml('<b>#1</b> a &amp; b &lt;c&gt; <a href="https://x?a=1&amp;b=2">link</a>')).toBe('#1 a & b <c> link')
+    expect(stripHtml('<blockquote expandable>q</blockquote>\n<i>x &quot;y&quot;</i>')).toBe('q\nx "y"')
+    expect(stripHtml('&amp;lt;')).toBe('&lt;')
+  })
+})
+
+describe('slackToHtml', () => {
+  const users = { U1: 'Ann' }
+  const channels = { C2: 'dev' }
+  const h = (t: string) => slackToHtml(t, users, channels)
+  test('formatting', () => {
+    expect(h('*bold* _it_ ~gone~ `code`')).toBe('<b>bold</b> <i>it</i> <s>gone</s> <code>code</code>')
+    expect(h('```\nconst a = 1 < 2\n```')).toBe('<pre>\nconst a = 1 &lt; 2\n</pre>')
+    expect(h('snake_case_name and 2*3*4')).toBe('snake_case_name and 2*3*4')
+    expect(h('`*not bold*`')).toBe('<code>*not bold*</code>')
+  })
+  test('mentions, channels, specials and links', () => {
+    expect(h('<@U1> и <@U9>')).toBe('@Ann и @U9')
+    expect(h('<#C1|general> <#C2> <#C3>')).toBe('#general #dev #C3')
+    expect(h('<!here> <!channel>')).toBe('@here @channel')
+    expect(h('<https://a.b/?x=1&amp;y=2|сайт &amp; ко> <https://c.d>'))
+      .toBe('<a href="https://a.b/?x=1&amp;y=2">сайт &amp; ко</a> <a href="https://c.d">https://c.d</a>')
+    expect(h('*<@U1>* посмотри')).toBe('<b>@Ann</b> посмотри')
+  })
+  test('entities are decoded then re-escaped, raw markup can never leak', () => {
+    expect(h('a &amp; b &lt;script&gt;')).toBe('a &amp; b &lt;script&gt;')
+    expect(h('&lt;@U1&gt;')).toBe('&lt;@U1&gt;')
+    expect(slackToHtml('<@U1>', { U1: '<Evil & Co>' }, {})).toBe('@&lt;Evil &amp; Co&gt;')
+    expect(h('<https://x|a"b>')).toBe('<a href="https://x">a"b</a>')
+    expect(h('<https://x?q="1">')).toBe('<a href="https://x?q=&quot;1&quot;">https://x?q="1"</a>')
   })
 })

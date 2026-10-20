@@ -26,6 +26,63 @@ export function humanizeSlack(text: string, users: Record<string, string>, chann
     .replace(/&amp;/g, '&')
 }
 
+/** Escapes text for Telegram's HTML parse mode. */
+export const escapeHtml = (text: string): string => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+const escapeAttr = (text: string): string => escapeHtml(text).replace(/"/g, '&quot;')
+
+const decodeSlack = (text: string): string => text.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
+
+/** Telegram HTML back to plain text: tags dropped, entities unescaped. */
+export function stripHtml(html: string): string {
+  return html
+    .replace(/<\/?[a-zA-Z][^<>]*>/g, '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, '&')
+}
+
+/** One Slack `<…>` token as Telegram HTML. */
+function slackToken(inner: string, users: Record<string, string>, channels: Record<string, string>): string {
+  const bar = inner.indexOf('|')
+  const target = decodeSlack(bar === -1 ? inner : inner.slice(0, bar))
+  const label = bar === -1 ? undefined : decodeSlack(inner.slice(bar + 1))
+  if (target.startsWith('@')) {
+    const id = target.slice(1)
+    return escapeHtml(`@${users[id] ?? label ?? id}`)
+  }
+  if (target.startsWith('#')) {
+    const id = target.slice(1)
+    return escapeHtml(`#${label ?? channels[id] ?? id}`)
+  }
+  if (target.startsWith('!')) {
+    const name = target.slice(1)
+    if (['here', 'channel', 'everyone'].includes(name)) return `@${name}`
+    return escapeHtml(label ?? `<${decodeSlack(inner)}>`)
+  }
+  return `<a href="${escapeAttr(target)}">${escapeHtml(label ?? target)}</a>`
+}
+
+/**
+ * Slack mrkdwn as Telegram HTML: *bold*, _italic_, ~strike~, `code`, ```pre```, mentions, channels and links.
+ * Everything else is escaped, so the result is always safe for parse_mode HTML.
+ */
+export function slackToHtml(text: string, users: Record<string, string>, channels: Record<string, string>): string {
+  const held: string[] = []
+  const hold = (html: string): string => `\u0000${held.push(html) - 1}\u0000`
+  let s = text
+    .replace(/```([\s\S]*?)```/g, (_, code: string) => hold(`<pre>${escapeHtml(decodeSlack(code))}</pre>`))
+    .replace(/`([^`\n]+)`/g, (_, code: string) => hold(`<code>${escapeHtml(decodeSlack(code))}</code>`))
+    .replace(/<([^<>\n]+)>/g, (_, inner: string) => hold(slackToken(inner, users, channels)))
+  s = escapeHtml(decodeSlack(s))
+  for (const [mark, tag] of [['\\*', 'b'], ['_', 'i'], ['~', 's']] as const) {
+    const re = new RegExp(`(^|[^\\w${mark}])${mark}(?=\\S)([^\\n]*?\\S)${mark}(?![\\w${mark}])`, 'g')
+    s = s.replace(re, (_, pre: string, body: string) => `${pre}<${tag}>${body}</${tag}>`)
+  }
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i: string) => held[Number(i)] ?? '')
+}
+
 export function slackify(text: string): string {
   return text.replace(/\*\*(.+?)\*\*/gs, '*$1*')
 }
