@@ -33,14 +33,29 @@ const escapeAttr = (text: string): string => escapeHtml(text).replace(/"/g, '&qu
 
 const decodeSlack = (text: string): string => text.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
 
-/** Telegram HTML back to plain text: tags dropped, entities unescaped. */
+const unescapeHtml = (text: string): string =>
+  text.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&')
+
+/** Telegram HTML back to plain text: links become «text (url)», other tags dropped, entities unescaped. */
 export function stripHtml(html: string): string {
   return html
-    .replace(/<\/?[a-zA-Z][^<>]*>/g, '')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&amp;/g, '&')
+    .split(/(<a href="[^"]*">[^<]*<\/a>)/)
+    .map((part, i) => {
+      if (i % 2 === 0) return unescapeHtml(part.replace(/<\/?[a-zA-Z][^<>]*>/g, ''))
+      const [, href = '', label = ''] = /^<a href="([^"]*)">([^<]*)<\/a>$/.exec(part) ?? []
+      const url = unescapeHtml(href)
+      const text = unescapeHtml(label)
+      return text === url ? text : `${text} (${url})`
+    })
+    .join('')
+}
+
+/** Only http(s) URLs may become links in Telegram HTML; anything else (javascript:, tg:, data:, …) is shown as text. */
+const isWebUrl = (url: string): boolean => /^https?:\/\//i.test(url)
+
+/** A link if the URL is http(s), otherwise the label as escaped text. */
+function link(url: string, label: string): string {
+  return isWebUrl(url) ? `<a href="${escapeAttr(url)}">${escapeHtml(label)}</a>` : escapeHtml(label)
 }
 
 /** One Slack `<…>` token as Telegram HTML. */
@@ -61,7 +76,24 @@ function slackToken(inner: string, users: Record<string, string>, channels: Reco
     if (['here', 'channel', 'everyone'].includes(name)) return `@${name}`
     return escapeHtml(label ?? `<${decodeSlack(inner)}>`)
   }
-  return `<a href="${escapeAttr(target)}">${escapeHtml(label ?? target)}</a>`
+  return link(target, label ?? target)
+}
+
+const NESTABLE = new Set(['b', 'i', 's', 'code', 'pre', 'a', 'blockquote'])
+
+/** True if every tag closes in order and no <pre> sits inside another tag. */
+function wellNested(html: string): boolean {
+  const stack: string[] = []
+  for (const [, close, name = ''] of html.matchAll(/<(\/?)([a-zA-Z]+)[^<>]*>/g)) {
+    if (!NESTABLE.has(name)) continue
+    if (close) {
+      if (stack.pop() !== name) return false
+    } else {
+      if (name === 'pre' && stack.length) return false
+      stack.push(name)
+    }
+  }
+  return stack.length === 0
 }
 
 /**
@@ -75,12 +107,16 @@ export function slackToHtml(text: string, users: Record<string, string>, channel
     .replace(/```([\s\S]*?)```/g, (_, code: string) => hold(`<pre>${escapeHtml(decodeSlack(code))}</pre>`))
     .replace(/`([^`\n]+)`/g, (_, code: string) => hold(`<code>${escapeHtml(decodeSlack(code))}</code>`))
     .replace(/<([^<>\n]+)>/g, (_, inner: string) => hold(slackToken(inner, users, channels)))
-  s = escapeHtml(decodeSlack(s))
+  const escaped = escapeHtml(decodeSlack(s))
+  const unhold = (html: string): string => html.replace(/\u0000(\d+)\u0000/g, (_, i: string) => held[Number(i)] ?? '')
+  s = escaped
   for (const [mark, tag] of [['\\*', 'b'], ['_', 'i'], ['~', 's']] as const) {
     const re = new RegExp(`(^|[^\\w${mark}])${mark}(?=\\S)([^\\n]*?\\S)${mark}(?![\\w${mark}])`, 'g')
     s = s.replace(re, (_, pre: string, body: string) => `${pre}<${tag}>${body}</${tag}>`)
   }
-  return s.replace(/\u0000(\d+)\u0000/g, (_, i: string) => held[Number(i)] ?? '')
+  const html = unhold(s)
+  // Overlapping marks (`*a _b* c_`) or bold around a code block: keep mentions, links and code, drop b/i/s.
+  return wellNested(html) ? html : unhold(escaped)
 }
 
 export function slackify(text: string): string {
@@ -135,8 +171,11 @@ function capHtml(html: string, max: number): string {
   return `${prefix}${closers(openTags(prefix))}\n…`
 }
 
-const quote = (msgs: SlackMsg[], users: Users, channels: Users): string =>
-  msgs.map((m) => slackToHtml(m.text, users, channels)).join('\n\n')
+/** Messages as one expandable blockquote, capped at QUOTE_MAX on a line boundary; '' when there is nothing to quote. */
+function quote(msgs: SlackMsg[], users: Users, channels: Users): string {
+  const q = capHtml(msgs.map((m) => slackToHtml(m.text, users, channels)).join('\n\n'), QUOTE_MAX)
+  return q ? `<blockquote expandable>${q}</blockquote>` : ''
+}
 
 const analysisHtml = (analysis: string): string =>
   escapeHtml(analysis).split('\n').map((line) => line.replace(LABEL, '<b>$&</b>')).join('\n')
@@ -149,10 +188,10 @@ export function renderItem(
   const variants = item.variants ?? []
   // Header, quote and link stay one paragraph: chunk() never splits it, and the cap keeps it well under 4096.
   const top = [header]
-  const q = capHtml(quote(item.messages, users, channels), QUOTE_MAX)
-  if (q) top.push(`<blockquote expandable>${q}</blockquote>`)
-  const link = item.messages[0]?.permalink
-  if (link) top.push(`<a href="${escapeAttr(link)}">Открыть в Slack</a>`)
+  const q = quote(item.messages, users, channels)
+  if (q) top.push(q)
+  const permalink = item.messages[0]?.permalink
+  if (permalink) top.push(isWebUrl(permalink) ? link(permalink, 'Открыть в Slack') : escapeHtml(permalink))
   const parts = [top.join('\n')]
   if (item.analysis) parts.push(analysisHtml(item.analysis))
   // Shown exactly as «N k» will send it (sendToSlack posts slackify(variant)).
@@ -168,7 +207,7 @@ export function renderItem(
 }
 
 const quoted = (title: string, msgs: SlackMsg[], users: Users, channels: Users): string =>
-  `<b>${escapeHtml(title)}</b>\n<blockquote>${quote(msgs, users, channels)}</blockquote>`
+  `<b>${escapeHtml(title)}</b>\n${quote(msgs, users, channels)}`
 
 export function renderUpdate(item: Item, newMsgs: SlackMsg[], users: Users = {}, channels: Users = {}): string {
   return quoted(`#${item.id} · дополнение`, newMsgs, users, channels)

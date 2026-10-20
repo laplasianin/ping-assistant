@@ -96,14 +96,30 @@ describe('other renders', () => {
   })
   test('renderThreadChanged and renderUpdate', () => {
     const { text, keyboard } = renderThreadChanged(item(), [msg('новое')])
-    expect(text).toBe('<b>#14 · в треде появилось новое</b>\n<blockquote>новое</blockquote>')
+    expect(text).toBe('<b>#14 · в треде появилось новое</b>\n<blockquote expandable>новое</blockquote>')
     expect(keyboard).toEqual([[{ label: 'Всё равно отправить', data: 'pa:force:14' }, { label: 'Отмена', data: 'pa:cancel:14' }]])
-    expect(renderUpdate(item(), [msg('a'), msg('b')])).toBe('<b>#14 · дополнение</b>\n<blockquote>a\n\nb</blockquote>')
+    expect(renderUpdate(item(), [msg('a'), msg('b')])).toBe('<b>#14 · дополнение</b>\n<blockquote expandable>a\n\nb</blockquote>')
   })
   test('renderUpdate and renderThreadChanged convert mentions and markup', () => {
     const m = [msg('привет <@U2> *срочно*')]
-    expect(renderUpdate(item(), m, { U2: 'Имя' })).toBe('<b>#14 · дополнение</b>\n<blockquote>привет @Имя <b>срочно</b></blockquote>')
-    expect(renderThreadChanged(item(), m, { U2: 'Имя' }).text).toBe('<b>#14 · в треде появилось новое</b>\n<blockquote>привет @Имя <b>срочно</b></blockquote>')
+    expect(renderUpdate(item(), m, { U2: 'Имя' })).toBe('<b>#14 · дополнение</b>\n<blockquote expandable>привет @Имя <b>срочно</b></blockquote>')
+    expect(renderThreadChanged(item(), m, { U2: 'Имя' }).text).toBe('<b>#14 · в треде появилось новое</b>\n<blockquote expandable>привет @Имя <b>срочно</b></blockquote>')
+  })
+  test('renderUpdate and renderThreadChanged cap the quote like an item: one expandable blockquote, cut on a line', () => {
+    const long = Array.from({ length: 60 }, () => `*${'ж'.repeat(98)}*`).join('\n')
+    for (const text of [renderUpdate(item(), [msg(long)]), renderThreadChanged(item(), [msg(long)]).text]) {
+      expect(text.match(/<blockquote/g)).toHaveLength(1)
+      expect(text).toContain('<blockquote expandable>')
+      expect(text).toEndWith('\n…</blockquote>')
+      expect(text.length).toBeLessThanOrEqual(2500 + 100)
+      expect(text).not.toContain('ж*')
+      expect(chunk(text)).toHaveLength(1)
+    }
+  })
+  test('a non-http permalink is shown as escaped text, not a link', () => {
+    const { text } = renderItem(item({ messages: [msg('x', { permalink: 'javascript:alert("1")<b>' })] }), {}, {}, NOW)
+    expect(text).not.toContain('<a href')
+    expect(text).toContain('javascript:alert("1")&lt;b&gt;')
   })
   test('outcome', () => {
     expect(outcome(item({ status: 'sent' }), 2)).toBe('✅ отправлен вариант 2')
@@ -168,7 +184,9 @@ describe('chunk', () => {
 describe('escapeHtml / stripHtml', () => {
   test('escapes &, <, > and strips back to plain text', () => {
     expect(escapeHtml('a & b <c> d')).toBe('a &amp; b &lt;c&gt; d')
-    expect(stripHtml('<b>#1</b> a &amp; b &lt;c&gt; <a href="https://x?a=1&amp;b=2">link</a>')).toBe('#1 a & b <c> link')
+    expect(stripHtml('<b>#1</b> a &amp; b &lt;c&gt; <a href="https://x?a=1&amp;b=2">link</a>')).toBe('#1 a & b <c> link (https://x?a=1&b=2)')
+    expect(stripHtml('<a href="https://slack/p1">Открыть в Slack</a>')).toBe('Открыть в Slack (https://slack/p1)')
+    expect(stripHtml('<a href="https://c.d/?q=&quot;1&quot;">https://c.d/?q="1"</a>')).toBe('https://c.d/?q="1"')
     expect(stripHtml('<blockquote expandable>q</blockquote>\n<i>x &quot;y&quot;</i>')).toBe('q\nx "y"')
     expect(stripHtml('&amp;lt;')).toBe('&lt;')
   })
@@ -198,5 +216,39 @@ describe('slackToHtml', () => {
     expect(slackToHtml('<@U1>', { U1: '<Evil & Co>' }, {})).toBe('@&lt;Evil &amp; Co&gt;')
     expect(h('<https://x|a"b>')).toBe('<a href="https://x">a"b</a>')
     expect(h('<https://x?q="1">')).toBe('<a href="https://x?q=&quot;1&quot;">https://x?q="1"</a>')
+  })
+  test('only http(s) links become <a href>; other schemes are escaped text', () => {
+    expect(h('<javascript:alert(1)|x>')).toBe('x')
+    expect(h('<javascript:alert(1)>')).toBe('javascript:alert(1)')
+    expect(h('<tg://user?id=1|"t">')).toBe('"t"')
+    expect(h('<data:text/html,&lt;b&gt;|d>')).toBe('d')
+    expect(h('<mailto:a@b.c>')).toBe('mailto:a@b.c')
+    expect(h('<HTTPS://A.B|ok> <http://c.d>')).toBe('<a href="HTTPS://A.B">ok</a> <a href="http://c.d">http://c.d</a>')
+    expect(h('<data:text/html,&lt;b&gt;>')).toBe('data:text/html,&lt;b&gt;')
+  })
+  const balanced = (html: string): boolean => {
+    const stack: string[] = []
+    for (const [, close, name = ''] of html.matchAll(/<(\/?)([a-z]+)[^<>]*>/g)) {
+      if (!close) stack.push(name)
+      else if (stack.pop() !== name) return false
+    }
+    return stack.length === 0
+  }
+  test('misnested bold/italic falls back to escaped text with mentions and links kept', () => {
+    for (const t of ['*a _b* c_', '_a *b_ c*', '*a ~b* c~ <@U1> <https://x|l>']) {
+      const out = h(t)
+      expect(balanced(out)).toBe(true)
+      expect(out).not.toMatch(/<[bis]>/)
+    }
+    expect(h('*a _b* c_')).toBe('*a _b* c_')
+    expect(h('_a *b_ c* <@U1> <https://x|l>')).toBe('_a *b_ c* @Ann <a href="https://x">l</a>')
+    expect(h('*a _b_ c*')).toBe('<b>a <i>b</i> c</b>')
+  })
+  test('bold spanning a code block does not wrap <pre>', () => {
+    const out = h('*a ```x\ny``` b*')
+    expect(out).not.toContain('<b><pre>')
+    expect(out).not.toMatch(/<b>[^]*<pre>/)
+    expect(balanced(out)).toBe(true)
+    expect(out).toContain('<pre>x\ny</pre>')
   })
 })

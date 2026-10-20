@@ -264,6 +264,18 @@ test('rejected HTML is resent once as plain text, without parse_mode, and logged
   expect(logs).toEqual(['html rejected, sent plain'])
 })
 
+test('the plain fallback keeps link URLs, so «Открыть в Slack» survives', async () => {
+  const { bot, api } = setup()
+  const real = api.sendMessage.bind(api)
+  let first = true
+  api.sendMessage = async (...args) => {
+    if (first) { first = false; throw cantParse() }
+    return real(...args)
+  }
+  await bot.send('<b>#1</b>\n<a href="https://slack.com/p1?a=1&amp;b=2">Открыть в Slack</a>')
+  expect(api.of('sendMessage')[0]?.args).toEqual([CHAT, '#1\nОткрыть в Slack (https://slack.com/p1?a=1&b=2)', {}])
+})
+
 test('edit falls back to plain text on a parse error; other errors propagate', async () => {
   const { bot, api, logs } = setup()
   const real = api.editMessageText.bind(api)
