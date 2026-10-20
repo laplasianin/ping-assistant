@@ -1577,7 +1577,7 @@ test('briefing fires once at the configured weekday moment, then waits for the n
   expect(briefings(e)).toHaveLength(1)
   expect(briefings(e)[0]!.meta).toEqual({ kind: 'briefing', source: 'ping-assistant' })
   const body = JSON.parse(briefings(e)[0]!.content)
-  expect(body.since).toBe(new Date(T0).toISOString()) // the previous run is later than 24 h ago
+  expect(body.since).toBe(new Date(T0).toISOString()) // the previous run
   expect(body.today).toBe('2026-10-20')
   expect(e.state.lastBriefingAt).toBe(moment)
 
@@ -1592,10 +1592,15 @@ test('briefing fires once at the configured weekday moment, then waits for the n
   expect(JSON.parse(briefings(e)[1]!.content).since).toBe(new Date(local(2026, 9, 20, 9, 30)).toISOString())
 })
 
-test('no briefing on a weekend; Monday gets one', async () => {
+test('no briefing on a weekend; Monday\'s covers everything since Friday\'s', async () => {
   const state = emptyState()
   const friday = local(2026, 9, 23, 9, 31)
   state.lastBriefingAt = friday
+  const fridayEvening = local(2026, 9, 23, 19, 0)
+  state.items['7'] = {
+    id: '7', seq: 7, sub: 0, status: 'ignored', source: 'im', channel: 'D1', author: 'U2', messages: [], context: [], lastSeenTs: '1.0',
+    createdAt: fridayEvening, lastMessageAt: fridayEvening, closedAt: fridayEvening, ignoreReason: 'FYI', telegram: {},
+  }
   const e = await setup({}, state)
   e.advance(local(2026, 9, 24, 9, 31) - T0) // Saturday
   await e.orch.tick()
@@ -1608,7 +1613,8 @@ test('no briefing on a weekend; Monday gets one', async () => {
   await e.orch.tick()
   await e.flush()
   expect(briefings(e)).toHaveLength(1)
-  expect(JSON.parse(briefings(e)[0]!.content).since).toBe(new Date(local(2026, 9, 26, 9, 31) - DAY_MS).toISOString())
+  expect(JSON.parse(briefings(e)[0]!.content).since).toBe(new Date(friday).toISOString())
+  expect(JSON.parse(briefings(e)[0]!.content).ignored.map((i: { id: string }) => i.id)).toEqual(['7']) // Friday evening, > 24 h ago
 })
 
 test('a briefing moment missed while asleep fires once on the first tick after it', async () => {

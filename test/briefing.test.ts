@@ -46,10 +46,11 @@ test('lastBriefingMoment: the latest configured weekday moment at or before now'
   expect(lastBriefingMoment(local(2026, 9, 18, 7, 0), { hour: 8, minute: 0, weekdays: [0] })).toBe(local(2026, 9, 11, 8, 0))
 })
 
-test('since is the later of the previous briefing and 24 h ago', () => {
+test('since is the previous briefing, at most 7 days back; without one, 24 h ago', () => {
   const s = stateWith()
   expect(briefingPayload(s, cfg, NOW, undefined).since).toBe(new Date(NOW - 24 * HOUR).toISOString())
-  expect(briefingPayload(s, cfg, NOW, NOW - 3 * 24 * HOUR).since).toBe(new Date(NOW - 24 * HOUR).toISOString())
+  expect(briefingPayload(s, cfg, NOW, NOW - 3 * 24 * HOUR).since).toBe(new Date(NOW - 3 * 24 * HOUR).toISOString())
+  expect(briefingPayload(s, cfg, NOW, NOW - 10 * 24 * HOUR).since).toBe(new Date(NOW - 7 * 24 * HOUR).toISOString())
   expect(briefingPayload(s, cfg, NOW, NOW - 2 * HOUR).since).toBe(new Date(NOW - 2 * HOUR).toISOString())
   expect(briefingPayload(s, cfg, NOW, undefined).today).toBe('2026-10-20')
 })

@@ -4,6 +4,8 @@ import type { BriefingCron, Config } from './config'
 import type { Item, State } from './state'
 
 const DAY_MS = 86_400_000
+/** A briefing never reaches further back than this, however long ago the previous one ran. */
+const SINCE_MAX_MS = 7 * DAY_MS
 const MIN_MS = 60_000
 /** The session needs a few notable ignores to spot wrong triage, not the whole journal. */
 export const BRIEFING_IGNORED_MAX = 20
@@ -44,7 +46,8 @@ const localDate = (ms: number): string => {
 }
 
 export function briefingPayload(state: State, cfg: Config, now: number, lastBriefingAt: number | undefined): Briefing {
-  const since = Math.max(lastBriefingAt ?? 0, now - DAY_MS)
+  // Everything since the previous briefing (Monday covers the weekend); with none yet, the last 24 h.
+  const since = lastBriefingAt === undefined ? now - DAY_MS : Math.max(lastBriefingAt, now - SINCE_MAX_MS)
   const items = Object.values(state.items)
   const channel = (i: Item): string => i.channelName ?? state.channels[i.channel] ?? i.channel
   const author = (i: Item): string => i.authorName ?? state.users[i.author] ?? i.author
