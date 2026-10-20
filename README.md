@@ -260,10 +260,10 @@ tmux kill-session -t ping-assistant   # остановить саму сесси
 
 ### Watchdog
 
-`scripts/watchdog.ts` проверяет, что процесс `bun run src/main.ts` этого репозитория запущен. Если нет,
-шлёт в Telegram (`TELEGRAM_BOT_TOKEN` из `~/.config/ping-assistant/.env`, `telegramChatId` из конфига)
+`scripts/watchdog.ts` раз в 5 минут проверяет, что процесс `bun run src/main.ts` этого репозитория запущен. Если сервера нет дольше 5 минут
+(короткий перезапуск не считается), шлёт в Telegram (`TELEGRAM_BOT_TOKEN` из `~/.config/ping-assistant/.env`, `telegramChatId` из конфига)
 «⚠️ Ping Assistant не запущен. Открой «Ping Assistant.command» или запусти bin/ping-assistant-session»,
-не чаще раза в 60 минут. Когда сервер вернулся, один раз шлёт «✅ Ping Assistant снова работает».
+не чаще раза в 60 минут. Когда сервер вернулся после алерта, один раз шлёт «✅ Ping Assistant снова работает».
 Состояние хранится в `~/.config/ping-assistant/watchdog.json`; если отправка не удалась, оно не меняется и
 следующий запуск повторит попытку. Токены и тексты сообщений не логируются, код выхода всегда 0.
 

@@ -1,5 +1,5 @@
 // Telegram watchdog: run from launchd every few minutes. Alerts when the Ping Assistant server
-// (`bun run src/main.ts`) is not running, at most once per hour; announces recovery once.
+// (`bun run src/main.ts`) has been missing for 5+ minutes, at most once per hour; announces recovery once.
 // Exits 0 always. Never logs tokens or message text.
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -10,28 +10,50 @@ export const ALERT_TEXT = '⚠️ Ping Assistant не запущен. Откро
 export const RECOVERY_TEXT = '✅ Ping Assistant снова работает'
 export const ALERT_INTERVAL_MS = 60 * 60 * 1000
 
-export type WatchdogState = { lastAlertAt?: number }
+export const MISSING_GRACE_MS = 5 * 60 * 1000
+
+export type WatchdogState = { lastAlertAt?: number; missingSince?: number }
 export type Decision = { action: 'alert' | 'recover' | 'none'; next: WatchdogState }
 
-/** Pure decision: `next` is the state to persist once the action's message was delivered. */
+/**
+ * Pure decision: `next` is the state to persist (for 'alert' and 'recover', once the message was delivered).
+ * Alerts only after the server has been missing for MISSING_GRACE_MS, so a restart gap does not trigger one.
+ */
 export function decide(running: boolean, now: number, state: WatchdogState): Decision {
   if (running) {
-    return state.lastAlertAt === undefined ? { action: 'none', next: state } : { action: 'recover', next: {} }
+    return state.lastAlertAt === undefined ? { action: 'none', next: {} } : { action: 'recover', next: {} }
+  }
+  const missingSince = state.missingSince ?? now
+  if (now - missingSince < MISSING_GRACE_MS) {
+    return { action: 'none', next: { ...state, missingSince } }
   }
   if (state.lastAlertAt === undefined || now - state.lastAlertAt > ALERT_INTERVAL_MS) {
-    return { action: 'alert', next: { lastAlertAt: now } }
+    return { action: 'alert', next: { lastAlertAt: now, missingSince } }
   }
-  return { action: 'none', next: state }
+  return { action: 'none', next: { ...state, missingSince } }
+}
+
+function finiteNumber(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined
 }
 
 export function parseState(text: string): WatchdogState {
   try {
-    const v: unknown = JSON.parse(text)
-    const at = (v as { lastAlertAt?: unknown } | null)?.lastAlertAt
-    return typeof at === 'number' && Number.isFinite(at) ? { lastAlertAt: at } : {}
+    const v = JSON.parse(text) as { lastAlertAt?: unknown; missingSince?: unknown } | null
+    const state: WatchdogState = {}
+    const alertAt = finiteNumber(v?.lastAlertAt)
+    const missingSince = finiteNumber(v?.missingSince)
+    if (alertAt !== undefined) state.lastAlertAt = alertAt
+    if (missingSince !== undefined) state.missingSince = missingSince
+    return state
   } catch {
     return {}
   }
+}
+
+function writeState(statePath: string, state: WatchdogState): void {
+  mkdirSync(dirname(statePath), { recursive: true })
+  writeFileSync(statePath, JSON.stringify(state))
 }
 
 async function run(cmd: string[]): Promise<{ code: number; out: string }> {
@@ -73,15 +95,18 @@ async function main(): Promise<void> {
 
   const running = await serverRunning(repo)
   const decision = decide(running, Date.now(), state)
-  if (decision.action === 'none') return
+  if (decision.action === 'none') {
+    if (JSON.stringify(decision.next) !== JSON.stringify(state)) writeState(statePath, decision.next)
+    return
+  }
 
   const config = loadConfig(join(repo, 'ping-assistant.config.json'))
   const { telegramToken } = loadSecrets()
   const ok = await sendTelegram(telegramToken, config.telegramChatId, decision.action === 'alert' ? ALERT_TEXT : RECOVERY_TEXT)
   console.log(`watchdog: ${decision.action} ${ok ? 'sent' : 'send failed'}`)
-  if (!ok) return // keep the state, so the next run retries
-  mkdirSync(dirname(statePath), { recursive: true })
-  writeFileSync(statePath, JSON.stringify(decision.next))
+  if (ok) return writeState(statePath, decision.next)
+  // keep the state so the next run retries, but remember when the outage began
+  if (decision.action === 'alert') writeState(statePath, { ...state, missingSince: decision.next.missingSince })
 }
 
 if (import.meta.main) {
