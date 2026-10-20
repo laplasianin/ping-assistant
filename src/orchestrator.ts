@@ -3,7 +3,7 @@
 import type { Channel, ChannelHandlers } from './channel'
 import { callbackData, type Command } from './commands'
 import type { Config } from './config'
-import { outcome, renderItem, renderProposal, renderThreadChanged, renderUpdate, slackify, type Keyboard } from './format'
+import { escapeHtml, outcome, renderItem, renderProposal, renderThreadChanged, renderUpdate, slackify, type Keyboard } from './format'
 import { ItemMessages, itemJson, lastPart, msgJson, withoutHint } from './item-messages'
 import { ingest, mature, prune } from './items'
 import type { RawMsg, SlackClient } from './slack/client'
@@ -255,7 +255,7 @@ export class Orchestrator {
       return
     }
     const item = state.items[c.itemId]
-    if (!item) { await tg.send(`Не знаю айтем #${c.itemId}`); return }
+    if (!item) { await tg.send(`Не знаю айтем #${escapeHtml(c.itemId)}`); return }
     const skippable = c.kind === 'skip' && item.status === 'triage' // from the «без разбора» reminder
     if (item.status !== 'awaiting' && !skippable) { await tg.send(`#${item.id} уже закрыт: ${outcome(item) || item.status}`); return }
     if (button && this.staleButton(item, c, messageId)) { await tg.send(`Кнопка устарела, см. #${item.id} ниже`); return }
@@ -305,7 +305,7 @@ export class Orchestrator {
       } catch (err) {
         // Fail closed: an unverified conversation is treated like a changed one.
         log(`thread check failed: ${errName(err)}`)
-        const warning = `⚠️ не смог проверить тред #${item.id} (${errName(err)}), нажми «Всё равно отправить» или повтори`
+        const warning = `⚠️ не смог проверить тред #${item.id} (${escapeHtml(errName(err))}), нажми «Всё равно отправить» или повтори`
         return this.holdForForce(item, text, chosen, warning)
       }
       if (answered) return this.answeredMeanwhile(item)
@@ -315,14 +315,14 @@ export class Orchestrator {
     }
     if (cfg.dryRun) {
       const where = item.messages[0]?.permalink ?? `#${this.channelName(item)}`
-      await tg.send(`🧪 dry-run, отправил бы в ${where}:\n${text}`, undefined, item.telegram.messageId)
+      await tg.send(`🧪 dry-run, отправил бы в ${escapeHtml(where)}:\n${escapeHtml(text)}`, undefined, item.telegram.messageId)
       item.sentTs = 'dry-run'
     } else {
       const threadTs = item.threadTs ?? (isDm(item) ? undefined : item.messages[0]?.ts)
       try {
         item.sentTs = (await slack.postMessage(item.channel, text, threadTs)).ts
       } catch (err) {
-        await tg.send(`#${item.id}: не удалось отправить в Slack (${err instanceof Error ? err.message : 'unknown'})`)
+        await tg.send(`#${item.id}: не удалось отправить в Slack (${escapeHtml(err instanceof Error ? err.message : 'unknown')})`)
         return
       }
       state.msgIndex[`${item.channel}:${item.sentTs}`] = item.id
@@ -337,7 +337,7 @@ export class Orchestrator {
     if (warning !== undefined) await this.msgs.dropKeyboard(warning)
     if (!cfg.dryRun) {
       const link = await slack.permalink(item.channel, item.sentTs).catch(() => undefined)
-      await tg.send(`✅ отправлено${link ? `: ${link}` : ''}`, undefined, item.telegram.messageId)
+      await tg.send(`✅ отправлено${link ? `: ${escapeHtml(link)}` : ''}`, undefined, item.telegram.messageId)
     }
   }
 

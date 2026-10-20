@@ -24,53 +24,86 @@ describe('humanizeSlack', () => {
 })
 
 describe('renderItem', () => {
-  test('variants are shown exactly as they will be sent (slackified)', () => {
-    const v = 'Смотри **тут** и **там**'
+  test('variants are shown exactly as they will be sent (slackified), escaped', () => {
+    const v = 'Смотри **тут** и <там>'
     const { text } = renderItem(item({ variants: [v] }), {}, {}, NOW)
-    expect(text).toContain(`Варианты:\n1. ${slackify(v)}`)
+    expect(text).toContain(`<b>Варианты</b>\n1️⃣ ${escapeHtml(slackify(v))}`)
     expect(text).not.toContain('**')
   })
 
-  test('header has id, channel, author, age and N+1 buttons', () => {
-    const { text, keyboard } = renderItem(item(), { U2: 'Bob' }, {}, NOW)
-    expect(text.startsWith('#14 · #pathfinders · Max Darski · 5 мин назад')).toBe(true)
-    expect(text).toContain('Привет, @Bob!')
-    expect(text).toContain('https://slack/p1')
-    expect(text).toContain('Варианты:\n1. Да\n2. Нет\n3. Позже')
-    expect(text).toContain('Ответь: «14 1» · «14 2, но …» · «14: свой текст» · «14 пропустить»')
+  test('target layout: bold header, expandable quote, link, bold labels, numbered variants, italic hint', () => {
+    const analysis = 'Тип: вопрос\nВопросы (2): статус?\nРазбор: <нужен> ответ\nСмысл: просит статус'
+    const { text, keyboard } = renderItem(item({ analysis }), { U2: 'Bob' }, {}, NOW)
+    expect(text).toBe([
+      '<b>#14</b> · #pathfinders · Max Darski · 5 мин назад\n'
+        + '<blockquote expandable>Привет, @Bob!</blockquote>\n'
+        + '<a href="https://slack/p1">Открыть в Slack</a>',
+      '<b>Тип:</b> вопрос\n<b>Вопросы (2):</b> статус?\n<b>Разбор:</b> &lt;нужен&gt; ответ\nСмысл: просит статус',
+      '<b>Варианты</b>\n1️⃣ Да',
+      '2️⃣ Нет',
+      '3️⃣ Позже',
+      '<i>Правка: ответь цитатой «2, но …» или «: свой текст»</i>',
+    ].join('\n\n'))
+    expect(text).not.toContain('Ответь:')
     expect(keyboard[0].map((b) => b.label)).toEqual(['1', '2', '3', 'Пропустить'])
     expect(keyboard[0].map((b) => b.data)).toEqual(['pa:choose:14:1', 'pa:choose:14:2', 'pa:choose:14:3', 'pa:skip:14'])
   })
+  test('Slack markup in the quote becomes HTML, names are escaped', () => {
+    const { text } = renderItem(item({ channelName: 'a<b', authorName: 'A & B', messages: [msg('*важно* <https://x|PR>')] }), {}, {}, NOW)
+    expect(text.split('\n')[0]).toBe('<b>#14</b> · #a&lt;b · A &amp; B · 5 мин назад')
+    expect(text).toContain('<blockquote expandable><b>важно</b> <a href="https://x">PR</a></blockquote>')
+  })
+  test('more than three variants fall back to «4.»', () => {
+    const { text } = renderItem(item({ variants: ['a', 'b', 'c', 'd'] }), {}, {}, NOW)
+    expect(text).toContain('3️⃣ c\n\n4. d')
+  })
   test('IM shows личка and age units', () => {
     const t = (it: Item) => renderItem(it, {}, {}, NOW).text.split('\n')[0]
-    expect(t(item({ source: 'im', channelName: undefined }))).toBe('#14 · личка · Max Darski · 5 мин назад')
+    expect(t(item({ source: 'im', channelName: undefined }))).toBe('<b>#14</b> · личка · Max Darski · 5 мин назад')
     expect(t(item({ lastMessageAt: NOW - 2 * 3_600_000 }))).toContain('2 ч назад')
     expect(t(item({ lastMessageAt: NOW - 3 * 86_400_000 }))).toContain('3 д назад')
   })
-  test('lists all questions when analysis has several', () => {
+  test('all messages go into one quote; analysis lines are kept', () => {
     const analysis = 'Тип: вопрос\n1) Когда релиз?\n2) Кто тестирует?'
     const { text } = renderItem(item({ analysis, messages: [msg('Когда релиз?'), msg('Кто тестирует?')] }), {}, {}, NOW)
     expect(text).toContain('1) Когда релиз?\n2) Кто тестирует?')
-    expect(text).toContain('Когда релиз?\n\nКто тестирует?')
+    expect(text).toContain('<blockquote expandable>Когда релиз?\n\nКто тестирует?</blockquote>')
+    expect(text.match(/<blockquote/g)).toHaveLength(1)
+  })
+  test('the quote is capped at 2500 chars on a line boundary, tags stay balanced', () => {
+    const line = `*${'ж'.repeat(98)}*`
+    const long = Array.from({ length: 60 }, () => line).join('\n')
+    const { text } = renderItem(item({ messages: [msg(long, { permalink: 'https://slack/p1' })] }), {}, {}, NOW)
+    const quote = text.slice(text.indexOf('<blockquote'), text.indexOf('</blockquote>') + '</blockquote>'.length)
+    expect(quote.length).toBeLessThanOrEqual(2500 + 100)
+    expect(quote).toEndWith('\n…</blockquote>')
+    expect(quote).not.toContain('ж*') // cut between lines: every line still converted whole
+    expect(quote.match(/<b>/g)!.length).toBe(quote.match(/<\/b>/g)!.length)
+    expect(text).toContain('<a href="https://slack/p1">Открыть в Slack</a>')
+  })
+  test('a cut inside a code block closes the open tags', () => {
+    const long = `\`\`\`\n${Array.from({ length: 100 }, (_, i) => `line ${i} ${'x'.repeat(40)}`).join('\n')}\n\`\`\``
+    const { text } = renderItem(item({ messages: [msg(long)] }), {}, {}, NOW)
+    expect(text).toContain('</pre>\n…</blockquote>')
   })
 })
 
 describe('other renders', () => {
   test('renderProposal has Отправить/Отмена with pa:confirm/pa:cancel', () => {
-    const { text, keyboard } = renderProposal(item(), 'Готово')
-    expect(text).toBe('#14 · финальный текст:\n\nГотово')
+    const { text, keyboard } = renderProposal(item(), 'Готово <b>')
+    expect(text).toBe('<b>#14 · финальный текст</b>\n\nГотово &lt;b&gt;')
     expect(keyboard).toEqual([[{ label: 'Отправить', data: 'pa:confirm:14' }, { label: 'Отмена', data: 'pa:cancel:14' }]])
   })
   test('renderThreadChanged and renderUpdate', () => {
     const { text, keyboard } = renderThreadChanged(item(), [msg('новое')])
-    expect(text).toBe('#14 · в треде появилось новое:\n\nновое')
+    expect(text).toBe('<b>#14 · в треде появилось новое</b>\n<blockquote>новое</blockquote>')
     expect(keyboard).toEqual([[{ label: 'Всё равно отправить', data: 'pa:force:14' }, { label: 'Отмена', data: 'pa:cancel:14' }]])
-    expect(renderUpdate(item(), [msg('a'), msg('b')])).toBe('#14 дополнение\n\na\n\nb')
+    expect(renderUpdate(item(), [msg('a'), msg('b')])).toBe('<b>#14 · дополнение</b>\n<blockquote>a\n\nb</blockquote>')
   })
-  test('renderUpdate and renderThreadChanged humanize mentions', () => {
-    const m = [msg('привет <@U2>')]
-    expect(renderUpdate(item(), m, { U2: 'Имя' })).toBe('#14 дополнение\n\nпривет @Имя')
-    expect(renderThreadChanged(item(), m, { U2: 'Имя' }).text).toBe('#14 · в треде появилось новое:\n\nпривет @Имя')
+  test('renderUpdate and renderThreadChanged convert mentions and markup', () => {
+    const m = [msg('привет <@U2> *срочно*')]
+    expect(renderUpdate(item(), m, { U2: 'Имя' })).toBe('<b>#14 · дополнение</b>\n<blockquote>привет @Имя <b>срочно</b></blockquote>')
+    expect(renderThreadChanged(item(), m, { U2: 'Имя' }).text).toBe('<b>#14 · в треде появилось новое</b>\n<blockquote>привет @Имя <b>срочно</b></blockquote>')
   })
   test('outcome', () => {
     expect(outcome(item({ status: 'sent' }), 2)).toBe('✅ отправлен вариант 2')
@@ -89,6 +122,15 @@ describe('slackify', () => {
   })
 })
 
+const balanced = (part: string): boolean => {
+  const stack: string[] = []
+  for (const [, close, name] of part.matchAll(/<(\/?)([a-z]+)[^<>]*>/g)) {
+    if (!close) stack.push(name!)
+    else if (stack.pop() !== name) return false
+  }
+  return stack.length === 0
+}
+
 describe('chunk', () => {
   test('keeps paragraphs and never exceeds limit', () => {
     expect(chunk('a\n\nb', 100)).toEqual(['a\n\nb'])
@@ -97,6 +139,29 @@ describe('chunk', () => {
     expect(parts).toEqual(['x', 'y'.repeat(10), 'y'.repeat(10), 'yyyyy\n\nz'])
     expect(parts.every((p) => p.length <= 10)).toBe(true)
     expect(chunk('short').length).toBe(1)
+  })
+  test('never splits a blockquote or a tag at its blank lines', () => {
+    const quote = `<blockquote expandable>${'q'.repeat(30)}\n\n${'r'.repeat(30)}</blockquote>`
+    const parts = chunk(`<b>#1</b>\n${quote}\n\n${'a'.repeat(50)}`, 120)
+    expect(parts).toEqual([`<b>#1</b>\n${quote}`, 'a'.repeat(50)])
+  })
+  test('an oversized tagged paragraph is split with its tags closed and reopened', () => {
+    const lines = Array.from({ length: 40 }, (_, i) => `line ${i} &amp; <b>bold</b>`)
+    const para = `<blockquote>${lines.join('\n')}</blockquote>`
+    const parts = chunk(`head\n\n${para}`, 200)
+    expect(parts.length).toBeGreaterThan(3)
+    expect(parts.every((p) => p.length <= 200 && balanced(p))).toBe(true)
+    expect(parts.slice(1).every((p) => p.startsWith('<blockquote>') && p.endsWith('</blockquote>'))).toBe(true)
+    expect(parts.map(stripHtml).join('\n').replace(/^head\n/, '')).toBe(stripHtml(para))
+  })
+  test('a hard cut never lands inside a tag or an entity', () => {
+    const para = `<b>${'x'.repeat(5)}&amp;${'y'.repeat(30)}</b>`
+    const parts = chunk(para, 20)
+    expect(parts.every((p) => p.length <= 20 && balanced(p) && !/&[a-z]*$/.test(p.replace(/<[^>]*>$/g, '')))).toBe(true)
+    expect(parts.map(stripHtml).join('')).toBe(stripHtml(para))
+  })
+  test('plain mode keeps the old behaviour for text with stray <', () => {
+    expect(chunk('a <b\n\nc', 5, false)).toEqual(['a <b', 'c'])
   })
 })
 

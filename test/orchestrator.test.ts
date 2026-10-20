@@ -196,7 +196,7 @@ test('propose(variants) sends telegram message with buttons and sets awaiting', 
   await matureThreadItem(e)
   const sent = await propose(e, ['Да, починю', 'Нет, это не моё'])
   expect(sent.text).toContain('Почему падает сборка?')
-  expect(sent.text).toContain('1. Да, починю')
+  expect(sent.text).toContain('1️⃣ Да, починю')
   expect(buttons(sent)).toEqual(['1', '2', 'Пропустить'])
   const item = e.state.items['1']!
   expect(item.status).toBe('awaiting')
@@ -217,12 +217,28 @@ test('choose sends variant verbatim to slack in thread and edits outcome', async
   expect(item.sentTs).toBe('9000.000100')
   const edit = e.api.lastEdit(sent.id)!
   expect(edit.text).toContain('✅ отправлен вариант 2')
-  expect(edit.text).not.toContain('Ответь:')
+  expect(edit.text).toContain('2️⃣ Смотри *тут* &lt;https://x|PR&gt;') // escaped: shown as sent
+  expect(edit.text).not.toContain('<i>Правка:')
   expect(edit.opts.reply_markup).toEqual({ inline_keyboard: [] })
   expect(e.api.last().text).toBe('✅ отправлено: https://slack/C1/9000.000100')
   expect(e.state.watchedThreads['C1:100.000000']!.until).toBe(T0 + 91_000 + 7 * 86_400_000)
   expect(e.state.cursors['thr:C1:100.000000']).toBe('9000.000100')
   expect(e.state.msgIndex['C1:9000.000100']).toBe('1')
+})
+
+test('item text from Slack is HTML-escaped, and the outcome edit keeps it escaped', async () => {
+  const e = await setup()
+  await matureThreadItem(e, 'if a &lt; b &amp;&amp; *c* <@U7>')
+  e.state.users.U7 = 'Ann <QA>'
+  const sent = await propose(e, ['x < y', 'b'])
+  expect(sent.text).toContain('<blockquote expandable>if a &lt; b &amp;&amp; <b>c</b> @Ann &lt;QA&gt;</blockquote>')
+  expect(sent.text).toContain('1️⃣ x &lt; y')
+  const stored = e.state.items['1']!.telegram.text!
+  expect(stored).toContain('1️⃣ x &lt; y')
+  expect(stored).not.toContain('<i>Правка:')
+  await e.callback('pa:choose:1:1', sent.id)
+  expect(e.slack.posted).toEqual([{ channel: 'C1', text: 'x < y', threadTs: '100.000000' }])
+  expect(e.api.lastEdit(sent.id)!.text).toBe(`${stored}\n\n✅ отправлен вариант 1`)
 })
 
 test('choose validates the variant number, unknown and closed items', async () => {
@@ -375,7 +391,7 @@ test('appended message is quoted in telegram and notified as kind=update', async
   await e.flush()
 
   const upd = e.api.last()
-  expect(upd.text).toContain('#1 дополнение')
+  expect(upd.text).toContain('<b>#1 · дополнение</b>')
   expect(upd.opts.reply_parameters).toEqual({ message_id: sent.id })
   expect(e.notes).toHaveLength(1)
   expect(e.notes[0]!.meta).toEqual({ kind: 'update', item_id: '1', source: 'ping-assistant' })
@@ -645,14 +661,16 @@ test('a stale force button from an older warning posts nothing; a live warning s
 
 test('a long (>4096) item: revision leaves no live old buttons and the outcome edit succeeds', async () => {
   const e = await setup()
-  await matureThreadItem(e, "Длинный вопрос. ".repeat(400)) // ~6400 chars: several Telegram messages
+  await matureThreadItem(e, "Длинный вопрос. ".repeat(400)) // ~6400 chars: the quote is capped
+  const long = 'Длинный вариант. '.repeat(200) // ~3400 chars: with the quote, several Telegram messages
   const sendsBefore = e.api.sent.length
-  const first = await propose(e, ['a', 'b'])
+  const first = await propose(e, [long, 'b'])
   expect(e.api.sent.length - sendsBefore).toBeGreaterThan(1)
+  expect(e.api.sent.at(-2)!.text).toContain('…</blockquote>')
   expect(buttons(first)).toEqual(['1', '2', 'Пропустить'])
   expect(e.state.items['1']!.telegram.text!.length).toBeLessThanOrEqual(4096)
 
-  const second = await propose(e, ['c', 'd'])
+  const second = await propose(e, [long, 'd'])
   const revised = e.api.lastEdit(first.id)!
   expect(revised.text).toEndWith('✏️ правка ниже')
   expect(revised.opts.reply_markup).toEqual({ inline_keyboard: [] })

@@ -13,7 +13,7 @@ const notModified = (err: unknown): boolean => err instanceof Error && err.messa
 /** The text of the last Telegram message a long text is split into: the one carrying the buttons. */
 export const lastPart = (text: string): string => chunk(text, TG_LIMIT).pop() ?? ''
 
-/** The item's message text without the trailing «Ответь: …» hint line. */
+/** The item's message text without its trailing paragraph: the italic «Правка: …» hint. */
 export const withoutHint = (text: string): string => {
   const cut = text.lastIndexOf('\n\n')
   return cut < 0 ? '' : text.slice(0, cut)

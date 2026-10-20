@@ -95,22 +95,71 @@ function age(ms: number): string {
   return `${Math.floor(hours / 24)} д назад`
 }
 
-const quote = (msgs: SlackMsg[], users: Record<string, string>, channels: Record<string, string>): string =>
-  msgs.map((m) => humanizeSlack(m.text, users, channels)).join('\n\n')
+type Users = Record<string, string>
+
+/** The quote of an item is capped; the full text stays one tap away behind the Slack link. */
+export const QUOTE_MAX = 2500
+const HINT = '<i>Правка: ответь цитатой «2, но …» или «: свой текст»</i>'
+const LABEL = /^(Тип|Вопросы|Разбор|Контекст|Уверенность)[^:\n]*:/
+const NUMBERS = ['1️⃣', '2️⃣', '3️⃣']
+
+const TAG = /<(\/?)([a-zA-Z]+)[^<>]*>/g
+type Open = { name: string; tag: string }
+
+/** The tags still open after `html`, starting from `stack` (outermost first). */
+function openTags(html: string, stack: Open[] = []): Open[] {
+  const open = [...stack]
+  for (const [tag, close, name = ''] of html.matchAll(TAG)) {
+    if (!close) open.push({ name, tag })
+    else if (open.at(-1)?.name === name) open.pop()
+  }
+  return open
+}
+
+const closers = (open: Open[]): string => open.map((t) => `</${t.name}>`).reverse().join('')
+
+/** Moves a cut at `end` back so it never lands inside a tag or an entity. */
+function safeCut(html: string, end: number): number {
+  const lt = html.lastIndexOf('<', end - 1)
+  if (lt > html.lastIndexOf('>', end - 1)) end = lt
+  const amp = html.lastIndexOf('&', end - 1)
+  if (amp >= 0 && /^&[#a-zA-Z0-9]{1,8};/.test(html.slice(amp)) && html.indexOf(';', amp) >= end) end = amp
+  return end
+}
+
+/** Cuts HTML to about `max` chars at a line boundary, closing whatever is open and marking the cut with «…». */
+function capHtml(html: string, max: number): string {
+  if (html.length <= max) return html
+  const nl = html.lastIndexOf('\n', max)
+  const prefix = html.slice(0, nl > 0 ? nl : safeCut(html, max)).trimEnd()
+  return `${prefix}${closers(openTags(prefix))}\n…`
+}
+
+const quote = (msgs: SlackMsg[], users: Users, channels: Users): string =>
+  msgs.map((m) => slackToHtml(m.text, users, channels)).join('\n\n')
+
+const analysisHtml = (analysis: string): string =>
+  escapeHtml(analysis).split('\n').map((line) => line.replace(LABEL, '<b>$&</b>')).join('\n')
 
 export function renderItem(
-  item: Item, users: Record<string, string>, channels: Record<string, string>, now: number,
+  item: Item, users: Users, channels: Users, now: number,
 ): { text: string; keyboard: Keyboard } {
   const where = item.source === 'im' ? 'личка' : `#${item.channelName ?? item.channel}`
-  const header = `#${item.id} · ${where} · ${item.authorName ?? item.author} · ${age(now - item.lastMessageAt)}`
+  const header = `<b>#${escapeHtml(item.id)}</b> · ${escapeHtml(where)} · ${escapeHtml(item.authorName ?? item.author)} · ${age(now - item.lastMessageAt)}`
   const variants = item.variants ?? []
-  const parts = [header, quote(item.messages, users, channels)]
+  // Header, quote and link stay one paragraph: chunk() never splits it, and the cap keeps it well under 4096.
+  const top = [header]
+  const q = capHtml(quote(item.messages, users, channels), QUOTE_MAX)
+  if (q) top.push(`<blockquote expandable>${q}</blockquote>`)
   const link = item.messages[0]?.permalink
-  if (link) parts.push(link)
-  if (item.analysis) parts.push(item.analysis)
+  if (link) top.push(`<a href="${escapeAttr(link)}">Открыть в Slack</a>`)
+  const parts = [top.join('\n')]
+  if (item.analysis) parts.push(analysisHtml(item.analysis))
   // Shown exactly as «N k» will send it (sendToSlack posts slackify(variant)).
-  if (variants.length) parts.push(`Варианты:\n${variants.map((v, i) => `${i + 1}. ${slackify(v)}`).join('\n')}`)
-  parts.push(`Ответь: «${item.id} 1» · «${item.id} 2, но …» · «${item.id}: свой текст» · «${item.id} пропустить»`)
+  if (variants.length) {
+    parts.push(`<b>Варианты</b>\n${variants.map((v, i) => `${NUMBERS[i] ?? `${i + 1}.`} ${escapeHtml(slackify(v))}`).join('\n\n')}`)
+  }
+  parts.push(HINT)
   const keyboard: Keyboard = [[
     ...variants.map((_, i) => ({ label: String(i + 1), data: callbackData({ kind: 'choose', itemId: item.id, n: i + 1 }) })),
     { label: 'Пропустить', data: callbackData({ kind: 'skip', itemId: item.id }) },
@@ -118,18 +167,16 @@ export function renderItem(
   return { text: parts.join('\n\n'), keyboard }
 }
 
-const plain = (msgs: SlackMsg[], users: Record<string, string>, channels: Record<string, string>): string =>
-  quote(msgs, users, channels)
+const quoted = (title: string, msgs: SlackMsg[], users: Users, channels: Users): string =>
+  `<b>${escapeHtml(title)}</b>\n<blockquote>${quote(msgs, users, channels)}</blockquote>`
 
-export function renderUpdate(
-  item: Item, newMsgs: SlackMsg[], users: Record<string, string> = {}, channels: Record<string, string> = {},
-): string {
-  return `#${item.id} дополнение\n\n${plain(newMsgs, users, channels)}`
+export function renderUpdate(item: Item, newMsgs: SlackMsg[], users: Users = {}, channels: Users = {}): string {
+  return quoted(`#${item.id} · дополнение`, newMsgs, users, channels)
 }
 
 export function renderProposal(item: Item, text: string): { text: string; keyboard: Keyboard } {
   return {
-    text: `#${item.id} · финальный текст:\n\n${text}`,
+    text: `<b>#${escapeHtml(item.id)} · финальный текст</b>\n\n${escapeHtml(text)}`,
     keyboard: [[
       { label: 'Отправить', data: callbackData({ kind: 'confirm', itemId: item.id }) },
       { label: 'Отмена', data: callbackData({ kind: 'cancel', itemId: item.id }) },
@@ -138,10 +185,10 @@ export function renderProposal(item: Item, text: string): { text: string; keyboa
 }
 
 export function renderThreadChanged(
-  item: Item, newMsgs: SlackMsg[], users: Record<string, string> = {}, channels: Record<string, string> = {},
+  item: Item, newMsgs: SlackMsg[], users: Users = {}, channels: Users = {},
 ): { text: string; keyboard: Keyboard } {
   return {
-    text: `#${item.id} · в треде появилось новое:\n\n${plain(newMsgs, users, channels)}`,
+    text: quoted(`#${item.id} · в треде появилось новое`, newMsgs, users, channels),
     keyboard: [[
       { label: 'Всё равно отправить', data: callbackData({ kind: 'force', itemId: item.id }) },
       { label: 'Отмена', data: callbackData({ kind: 'cancel', itemId: item.id }) },
@@ -161,13 +208,62 @@ export function outcome(item: Item, chosen?: number | 'custom'): string {
   }
 }
 
-export function chunk(text: string, limit = 4096): string[] {
+/** Blank-line paragraphs, rejoined wherever a blank line falls inside an open tag (a quote of several messages). */
+function htmlParagraphs(text: string): string[] {
+  const out: string[] = []
+  let acc: string | undefined
+  for (const piece of text.split('\n\n')) {
+    acc = acc === undefined ? piece : `${acc}\n\n${piece}`
+    if (openTags(acc).length === 0) { out.push(acc); acc = undefined }
+  }
+  if (acc !== undefined) out.push(acc)
+  return out
+}
+
+/** An HTML paragraph over the limit: cut at line breaks where possible, tags closed at each cut and reopened after it. */
+function splitHtml(para: string, limit: number): string[] {
+  const out: string[] = []
+  let stack: Open[] = []
+  let pos = 0
+  for (;;) {
+    const prefix = stack.map((t) => t.tag).join('')
+    if (prefix.length + para.length - pos <= limit) { out.push(prefix + para.slice(pos)); return out }
+    let budget = limit - prefix.length
+    for (;;) {
+      const end = pos + Math.max(1, budget)
+      const nl = para.lastIndexOf('\n', end - 1)
+      let cut = nl > pos ? nl : safeCut(para, end)
+      if (cut <= pos) cut = Math.max(end, para.indexOf('>', pos) + 1) // a single tag longer than the budget
+      const piece = para.slice(pos, cut)
+      const next = openTags(piece, stack)
+      const over = prefix.length + piece.length + closers(next).length - limit
+      if (over <= 0 || budget <= 1) {
+        out.push(prefix + piece + closers(next))
+        stack = next
+        pos = nl > pos && cut === nl ? cut + 1 : cut
+        break
+      }
+      budget -= over
+    }
+  }
+}
+
+/**
+ * Splits text into Telegram-sized messages on blank lines. In HTML mode a paragraph is never split inside a tag:
+ * an oversized one is cut at line breaks with its open tags closed and reopened, and never inside an entity.
+ */
+export function chunk(text: string, limit = 4096, html = true): string[] {
   const out: string[] = []
   let cur = ''
-  for (const para of text.split('\n\n')) {
+  for (const para of html ? htmlParagraphs(text) : text.split('\n\n')) {
     if (cur && cur.length + 2 + para.length <= limit) { cur += `\n\n${para}`; continue }
     if (cur) out.push(cur)
     let rest = para
+    if (html && rest.length > limit) {
+      const pieces = splitHtml(rest, limit)
+      rest = pieces.pop() ?? ''
+      out.push(...pieces)
+    }
     while (rest.length > limit) { out.push(rest.slice(0, limit)); rest = rest.slice(limit) }
     cur = rest
   }
