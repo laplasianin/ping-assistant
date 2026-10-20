@@ -9,7 +9,7 @@ import { ingest, mature, prune } from './items'
 import type { RawMsg, SlackClient } from './slack/client'
 import { applyCursors, cmpTs, type Collector } from './slack/collector'
 import type { SlackSocket } from './slack/socket'
-import { OWN_MSG, type Item, type ItemStatus, type SlackMsg, type State, type StateStore } from './state'
+import { FEEDBACK_MAX, OWN_MSG, type Item, type ItemStatus, type SlackMsg, type State, type StateStore } from './state'
 import type { Inbound, TelegramBot } from './telegram/bot'
 
 export type OrchestratorDeps = {
@@ -254,6 +254,7 @@ export class Orchestrator {
       }
       return
     }
+    if (c.kind === 'bad' || c.kind === 'feedback') return this.onFeedback(c, messageId)
     const item = state.items[c.itemId]
     if (!item) { await tg.send(`Не знаю айтем #${escapeHtml(c.itemId)}`); return }
     const skippable = c.kind === 'skip' && item.status === 'triage' // from the «без разбора» reminder
@@ -295,6 +296,41 @@ export class Orchestrator {
     }
   }
 
+  /**
+   * 👎 and «фидбек: …»: recorded whatever the item's status, never changing it, and no button of the item is stale for it.
+   * A note joins the item's entry from the last 24 h (the 👎 it answers), or starts its own.
+   */
+  private async onFeedback(c: Extract<Command, { kind: 'bad' | 'feedback' }>, messageId: number): Promise<void> {
+    const { state, tg } = this.d
+    const now = this.now()
+    const item = state.items[c.itemId]
+    if (c.kind === 'feedback') {
+      const recent = [...state.feedback].reverse().find((f) => f.itemId === c.itemId && now - f.at < DAY_MS)
+      if (recent) recent.note = recent.note ? `${recent.note}\n${c.text}` : c.text
+      else if (item) this.addFeedback(item, now, c.text)
+      else { await tg.send(`Не знаю айтем #${escapeHtml(c.itemId)}`); return }
+      await tg.send('✍️ фидбек сохранён', undefined, messageId)
+      return
+    }
+    if (!item) { await tg.send(`Не знаю айтем #${escapeHtml(c.itemId)}`); return }
+    this.addFeedback(item, now)
+    const id = await tg.send('👎 записал. Что не так? Ответь цитатой: «фидбек: …»', undefined, messageId)
+    tg.registerMessage(id, item.id) // a quote-reply to it resolves to the item
+  }
+
+  private addFeedback(item: Item, at: number, note?: string): void {
+    const { feedback } = this.d.state
+    const chosen = item.sentChoice ?? item.telegram.chosen
+    feedback.push({
+      itemId: item.id, at, ...(note !== undefined ? { note } : {}),
+      ...(item.analysis !== undefined ? { analysis: item.analysis } : {}),
+      ...(item.variants ? { variants: [...item.variants] } : {}),
+      ...(chosen !== undefined ? { chosen } : {}),
+      source: item.source, channel: this.channelName(item),
+    })
+    if (feedback.length > FEEDBACK_MAX) feedback.splice(0, feedback.length - FEEDBACK_MAX)
+  }
+
   private async sendToSlack(item: Item, text: string, force: boolean, chosen?: number | 'custom'): Promise<void> {
     const { tg, slack, cfg, state } = this.d
     if (!force) {
@@ -329,6 +365,7 @@ export class Orchestrator {
       if (threadTs) this.watch(item, threadTs, item.sentTs)
     }
     item.status = 'sent'
+    item.sentChoice = chosen
     this.clearHeld(item)
     await this.msgs.annotate(item, outcome(item, chosen))
     const proposal = item.telegram.proposalMessageId

@@ -47,3 +47,25 @@ describe('callbacks', () => {
     expect(callbackData({ kind: 'choose', itemId: '14', n: 3 })).toBe('pa:choose:14:3')
   })
 })
+
+describe('feedback', () => {
+  test('pa:bad callback round-trips', () => {
+    expect(parseCallback('pa:bad:14')).toEqual({ kind: 'bad', itemId: '14' })
+    expect(parseCallback('pa:bad:14.2')).toEqual({ kind: 'bad', itemId: '14.2' })
+    expect(parseCallback('pa:bad:14:1')).toBeNull()
+    expect(callbackData({ kind: 'bad', itemId: '14' })).toBe('pa:bad:14')
+  })
+  test('<id> фидбек: text, also fb:, case-insensitive', () => {
+    expect(parseText('14 фидбек: слишком длинно')).toEqual({ kind: 'feedback', itemId: '14', text: 'слишком длинно' })
+    expect(parseText('14.2 ФИДБЕК:не тот тон')).toEqual({ kind: 'feedback', itemId: '14.2', text: 'не тот тон' })
+    expect(parseText('#14 fb: wrong language')).toEqual({ kind: 'feedback', itemId: '14', text: 'wrong language' })
+    expect(parseText('14 FB: x\nвторая строка')).toEqual({ kind: 'feedback', itemId: '14', text: 'x\nвторая строка' })
+  })
+  test('quote-reply with фидбек: resolves the id from the quote', () => {
+    expect(parseText('фидбек: пропустил второй вопрос', '14')).toEqual({ kind: 'feedback', itemId: '14', text: 'пропустил второй вопрос' })
+    expect(parseText('14 фидбек: тон', '14')).toEqual({ kind: 'feedback', itemId: '14', text: 'тон' })
+  })
+  test('empty feedback text is not feedback', () => {
+    expect(parseText('14 фидбек:')).toEqual({ kind: 'forward', itemId: '14', text: 'фидбек:' })
+  })
+})

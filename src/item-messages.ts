@@ -1,6 +1,6 @@
 // Keeping the Telegram messages of an item in step with its state, and the item's JSON for the session.
 // Every edit is best-effort: a failed edit is logged (kind only) and never blocks a state change.
-import { chunk, outcome, type Keyboard } from './format'
+import { chunk, feedbackKeyboard, outcome, type Keyboard } from './format'
 import type { Item, SlackMsg } from './state'
 import type { TelegramBot } from './telegram/bot'
 
@@ -39,17 +39,19 @@ export class ItemMessages {
   }
 
   /**
-   * Appends a status line to the item's message, removing its buttons. A last chunk too full for the line
-   * loses only its buttons, and the line goes out as a short reply to it instead of being dropped.
+   * Appends a status line to the item's message, removing its buttons except 👎 (once variants were shown:
+   * feedback stays possible after the item closes). A last chunk too full for the line loses its buttons,
+   * and the line (with the 👎 row) goes out as a short reply to it instead of being dropped.
    */
   async annotate(item: Item, line: string): Promise<void> {
     const { messageId, text } = item.telegram
     if (messageId === undefined || !text) return
+    const keep = item.variants?.length ? feedbackKeyboard(item.id) : undefined
     const full = `${text}\n\n${line}`
-    if (full.length <= TG_LIMIT) { await this.edit(messageId, full); return }
+    if (full.length <= TG_LIMIT) { await this.edit(messageId, full, keep); return }
     await this.dropKeyboard(messageId)
     try {
-      await this.tg.send(`#${item.id} · ${line}`, undefined, messageId)
+      await this.tg.send(`#${item.id} · ${line}`, keep, messageId)
     } catch (err) {
       log(`telegram send failed: ${errName(err)}`)
     }

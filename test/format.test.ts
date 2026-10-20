@@ -252,3 +252,18 @@ describe('slackToHtml', () => {
     expect(out).toContain('<pre>x\ny</pre>')
   })
 })
+
+describe('feedback button', () => {
+  test('item messages carry a second row with 👎 разбор', () => {
+    const { keyboard } = renderItem(item(), {}, {}, NOW)
+    expect(keyboard).toHaveLength(2)
+    expect(keyboard[1]).toEqual([{ label: '👎 разбор', data: 'pa:bad:14' }])
+  })
+  test('proposal and thread-changed warning have no feedback row', () => {
+    const datas = (kb: { data: string }[][]) => kb.flat().map((b) => b.data)
+    expect(renderProposal(item(), 'x').keyboard).toHaveLength(1)
+    expect(datas(renderProposal(item(), 'x').keyboard)).not.toContain('pa:bad:14')
+    expect(renderThreadChanged(item(), [msg('n')]).keyboard).toHaveLength(1)
+    expect(datas(renderThreadChanged(item(), [msg('n')]).keyboard)).not.toContain('pa:bad:14')
+  })
+})

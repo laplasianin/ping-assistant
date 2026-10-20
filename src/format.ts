@@ -180,6 +180,9 @@ function quote(msgs: SlackMsg[], users: Users, channels: Users): string {
 const analysisHtml = (analysis: string): string =>
   escapeHtml(analysis).split('\n').map((line) => line.replace(LABEL, '<b>$&</b>')).join('\n')
 
+/** The 👎 row of an item message: it outlives the item's other buttons (see ItemMessages.annotate). */
+export const feedbackKeyboard = (itemId: string): Keyboard => [[{ label: '👎 разбор', data: callbackData({ kind: 'bad', itemId }) }]]
+
 export function renderItem(
   item: Item, users: Users, channels: Users, now: number,
 ): { text: string; keyboard: Keyboard } {
@@ -202,7 +205,7 @@ export function renderItem(
   const keyboard: Keyboard = [[
     ...variants.map((_, i) => ({ label: String(i + 1), data: callbackData({ kind: 'choose', itemId: item.id, n: i + 1 }) })),
     { label: 'Пропустить', data: callbackData({ kind: 'skip', itemId: item.id }) },
-  ]]
+  ], ...feedbackKeyboard(item.id)]
   return { text: parts.join('\n\n'), keyboard }
 }
 

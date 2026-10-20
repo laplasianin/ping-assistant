@@ -5,12 +5,18 @@ export type Command =
   | { kind: 'confirm'; itemId: string }
   | { kind: 'force'; itemId: string }
   | { kind: 'cancel'; itemId: string }
+  | { kind: 'bad'; itemId: string }
+  | { kind: 'feedback'; itemId: string; text: string }
   | { kind: 'forward'; itemId?: string; text: string }
 
 const LEADING_ID = /^#?(\d+(?:\.\d+)?)(?=:|\s)/
 
+const FEEDBACK = /^(?:фидбек|fb)\s*:\s*(\S[\s\S]*)$/i
+
 function applyRules(itemId: string, rest: string): Command {
   const r = rest.trim()
+  const fb = FEEDBACK.exec(r)
+  if (fb) return { kind: 'feedback', itemId, text: fb[1]!.trim() }
   if (r.startsWith(':')) {
     const text = r.slice(1).trim()
     if (text) return { kind: 'custom', itemId, text }
@@ -41,10 +47,10 @@ export function parseCallback(data: string): Command | null {
     return n !== undefined && /^\d+$/.test(n) && parts.length === 4 ? { kind: 'choose', itemId, n: Number(n) } : null
   }
   if (parts.length !== 3) return null
-  if (action === 'skip' || action === 'confirm' || action === 'force' || action === 'cancel') return { kind: action, itemId }
+  if (action === 'skip' || action === 'confirm' || action === 'force' || action === 'cancel' || action === 'bad') return { kind: action, itemId }
   return null
 }
 
-export function callbackData(cmd: Exclude<Command, { kind: 'forward' | 'custom' }>): string {
+export function callbackData(cmd: Exclude<Command, { kind: 'forward' | 'custom' | 'feedback' }>): string {
   return cmd.kind === 'choose' ? `pa:choose:${cmd.itemId}:${cmd.n}` : `pa:${cmd.kind}:${cmd.itemId}`
 }

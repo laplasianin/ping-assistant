@@ -18,7 +18,14 @@ export type Item = {
   // triageAlerted: the «без разбора» reminder was sent (once per triage).
   telegram: { messageId?: number; proposalMessageId?: number; warningMessageId?: number; warningText?: string; text?: string; chosen?: number; triageAlerted?: boolean };
   ignoreReason?: string; sentTs?: string;
+  sentChoice?: number | 'custom';            // what was sent: variant N or Ilya's own text (kept for feedback)
 }
+/** A 👎 on an item or a «фидбек: …» note; snapshot of what the session proposed. Never pruned, capped at FEEDBACK_MAX. */
+export type FeedbackEntry = {
+  itemId: string; at: number; note?: string; analysis?: string; variants?: string[];
+  chosen?: number | 'custom'; source: ItemSource; channel: string;
+}
+export const FEEDBACK_MAX = 500
 export type State = {
   cursors: Record<string, string>;            // ключ: `hist:${channel}` | `thr:${channel}:${threadTs}` | 'search' | 'dmsearch' | 'lastTick'
   items: Record<string, Item>; nextSeq: number;
@@ -31,10 +38,12 @@ export type State = {
   imSweepAfter?: string;                      // quiet-IM sweep in progress: id of the last IM it read ('' = none yet)
   selfDmChannel?: string;                   // the IM with the user himself (selfDmTest)
   channels: Record<string, string>;           // channelId → name (кэш)
+  feedback: FeedbackEntry[];                  // oldest first
+  lastFeedbackReviewAt?: number;              // when the weekly feedback review last ran
 }
 
 export function emptyState(): State {
-  return { cursors: {}, items: {}, nextSeq: 1, msgIndex: {}, watchedThreads: {}, users: {}, channels: {} }
+  return { cursors: {}, items: {}, nextSeq: 1, msgIndex: {}, watchedThreads: {}, users: {}, channels: {}, feedback: [] }
 }
 
 export class StateStore {

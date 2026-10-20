@@ -197,7 +197,7 @@ test('propose(variants) sends telegram message with buttons and sets awaiting', 
   const sent = await propose(e, ['Да, починю', 'Нет, это не моё'])
   expect(sent.text).toContain('Почему падает сборка?')
   expect(sent.text).toContain('1️⃣ Да, починю')
-  expect(buttons(sent)).toEqual(['1', '2', 'Пропустить'])
+  expect(buttons(sent)).toEqual(['1', '2', 'Пропустить', '👎 разбор'])
   const item = e.state.items['1']!
   expect(item.status).toBe('awaiting')
   expect(item.variants).toEqual(['Да, починю', 'Нет, это не моё'])
@@ -219,7 +219,7 @@ test('choose sends variant verbatim to slack in thread and edits outcome', async
   expect(edit.text).toContain('✅ отправлен вариант 2')
   expect(edit.text).toContain('2️⃣ Смотри *тут* &lt;https://x|PR&gt;') // escaped: shown as sent
   expect(edit.text).not.toContain('<i>Правка:')
-  expect(edit.opts.reply_markup).toEqual({ inline_keyboard: [] })
+  expect(edit.opts.reply_markup).toEqual({ inline_keyboard: [[{ text: '👎 разбор', callback_data: 'pa:bad:1' }]] }) // only 👎 outlives the item
   expect(e.api.last().text).toBe('✅ отправлено: https://slack/C1/9000.000100')
   expect(e.state.watchedThreads['C1:100.000000']!.until).toBe(T0 + 91_000 + 7 * 86_400_000)
   expect(e.state.cursors['thr:C1:100.000000']).toBe('9000.000100')
@@ -321,7 +321,7 @@ test('propose(final) after revise sends proposal with Отправить/Отм�
   expect(proposal.opts.reply_parameters).toEqual({ message_id: original.id })
   const marked = e.api.lastEdit(original.id)!
   expect(marked.text).toContain('✏️ правка ниже')
-  expect(marked.opts.reply_markup).toEqual({ inline_keyboard: [] })
+  expect(marked.opts.reply_markup).toEqual({ inline_keyboard: [[{ text: '👎 разбор', callback_data: 'pa:bad:1' }]] })
   expect(e.state.items['1']!.pendingText).toBe(shown)
 
   await e.text('1 да')
@@ -337,7 +337,7 @@ test('cancel on a proposal restores the original buttons and sends nothing', asy
   await e.callback('pa:cancel:1', proposal.id)
 
   expect(e.api.lastEdit(proposal.id)!.text).toContain('❌ отменено')
-  expect(buttons(e.api.lastEdit(original.id)!)).toEqual(['1', '2', 'Пропустить'])
+  expect(buttons(e.api.lastEdit(original.id)!)).toEqual(['1', '2', 'Пропустить', '👎 разбор'])
   expect(e.state.items['1']!.pendingText).toBeUndefined()
   expect(e.slack.posted).toEqual([])
 })
@@ -351,7 +351,7 @@ test('skip closes item and edits outcome, nothing posted', async () => {
   expect(e.state.items['1']!.status).toBe('skipped')
   const edit = e.api.lastEdit(sent.id)!
   expect(edit.text).toContain('⏭ пропущен')
-  expect(edit.opts.reply_markup).toEqual({ inline_keyboard: [] })
+  expect(edit.opts.reply_markup).toEqual({ inline_keyboard: [[{ text: '👎 разбор', callback_data: 'pa:bad:1' }]] })
   expect(e.slack.posted).toEqual([])
 })
 
@@ -684,19 +684,19 @@ test('a long (>4096) item: revision leaves no live old buttons and the outcome e
   const first = await propose(e, [long, 'b'])
   expect(e.api.sent.length - sendsBefore).toBeGreaterThan(1)
   expect(e.api.sent.at(-2)!.text).toContain('…</blockquote>')
-  expect(buttons(first)).toEqual(['1', '2', 'Пропустить'])
+  expect(buttons(first)).toEqual(['1', '2', 'Пропустить', '👎 разбор'])
   expect(e.state.items['1']!.telegram.text!.length).toBeLessThanOrEqual(4096)
 
   const second = await propose(e, [long, 'd'])
   const revised = e.api.lastEdit(first.id)!
   expect(revised.text).toEndWith('✏️ правка ниже')
-  expect(revised.opts.reply_markup).toEqual({ inline_keyboard: [] })
+  expect(revised.opts.reply_markup).toEqual({ inline_keyboard: [[{ text: '👎 разбор', callback_data: 'pa:bad:1' }]] }) // no live send buttons; 👎 is harmless
 
   await e.callback('pa:choose:1:2', second.id)
   expect(e.slack.posted).toEqual([{ channel: 'C1', text: 'd', threadTs: '100.000000' }])
   const done = e.api.lastEdit(second.id)!
   expect(done.text).toEndWith('✅ отправлен вариант 2')
-  expect(done.opts.reply_markup).toEqual({ inline_keyboard: [] })
+  expect(done.opts.reply_markup).toEqual({ inline_keyboard: [[{ text: '👎 разбор', callback_data: 'pa:bad:1' }]] })
 })
 
 test('a tick that fails mid-ingest commits no cursors, and a restart replays the lost message', async () => {
@@ -827,7 +827,7 @@ test('own reply in the thread found by the pre-send check closes the item instea
   expect(e.slack.posted).toEqual([])
   expect(e.state.items['1']!.status).toBe('answered_manually')
   expect(e.api.lastEdit(sent.id)!.text).toEndWith('🙈 отвечено вручную')
-  expect(e.api.lastEdit(sent.id)!.opts.reply_markup).toEqual({ inline_keyboard: [] })
+  expect(e.api.lastEdit(sent.id)!.opts.reply_markup).toEqual({ inline_keyboard: [[{ text: '👎 разбор', callback_data: 'pa:bad:1' }]] })
   expect(e.api.last().text).toBe('🙈 #1 — ты уже ответил в треде')
 })
 
@@ -1152,4 +1152,113 @@ test('a pruned mention item whose hit is still above the search floor is not re-
   await e.orch.tick() // the same hit comes back from search
   expect(Object.keys(state.items)).toEqual([])
   expect(state.cursors.search).toBe(ts(hit - 600_000))
+})
+
+const BAD_REPLY = '👎 записал. Что не так? Ответь цитатой: «фидбек: …»'
+
+test('👎 stores a feedback entry with a snapshot, replies quoting the item, and leaves the item as it was', async () => {
+  const e = await setup()
+  e.state.channels.C1 = 'pathfinders'
+  await matureThreadItem(e)
+  const sent = await propose(e, ['a', 'b'])
+  expect(buttons(sent)).toEqual(['1', '2', 'Пропустить', '👎 разбор'])
+  await e.callback('pa:bad:1', sent.id)
+  await e.flush()
+
+  expect(e.state.feedback).toEqual([{
+    itemId: '1', at: T0 + 91_000, analysis: 'Тип: технический', variants: ['a', 'b'], source: 'channel', channel: 'pathfinders',
+  }])
+  const reply = e.api.last()
+  expect(reply.text).toBe(BAD_REPLY)
+  expect(reply.opts.reply_parameters).toEqual({ message_id: sent.id })
+  expect(e.tg.resolveItemId(reply.id)).toBe('1') // a quote-reply to it is about item 1
+  expect(e.state.items['1']!.status).toBe('awaiting')
+  expect(e.api.edits.filter((x) => x.id === sent.id)).toEqual([]) // its buttons stay
+  expect(e.notes.map((n) => n.meta.kind)).toEqual(['item']) // the session is not involved
+  expect(e.slack.posted).toEqual([])
+})
+
+test('👎 survives closing: a sent item keeps only the 👎 row, and its entry records what was sent', async () => {
+  const e = await setup()
+  await matureThreadItem(e)
+  const sent = await propose(e, ['a', 'b'])
+  await e.callback('pa:choose:1:2', sent.id)
+  expect(buttons(e.api.lastEdit(sent.id)!)).toEqual(['👎 разбор'])
+  await e.callback('pa:bad:1', sent.id)
+  expect(e.state.items['1']!.status).toBe('sent')
+  expect(e.state.feedback).toHaveLength(1)
+  expect(e.state.feedback[0]).toMatchObject({ itemId: '1', chosen: 2, variants: ['a', 'b'] })
+  expect(e.api.last().text).toBe(BAD_REPLY)
+})
+
+test('👎 on a skipped item works too; an unknown item gets «Не знаю айтем»', async () => {
+  const e = await setup()
+  await matureThreadItem(e)
+  const sent = await propose(e, ['a', 'b'])
+  await e.callback('pa:skip:1', sent.id)
+  expect(buttons(e.api.lastEdit(sent.id)!)).toEqual(['👎 разбор'])
+  await e.callback('pa:bad:1', sent.id)
+  expect(e.state.items['1']!.status).toBe('skipped')
+  expect(e.state.feedback).toHaveLength(1)
+  expect(e.state.feedback[0]!.chosen).toBeUndefined()
+  await e.callback('pa:bad:9', sent.id)
+  expect(e.api.last().text).toBe('Не знаю айтем #9')
+  expect(e.state.feedback).toHaveLength(1)
+})
+
+test('«фидбек: …» quoting the 👎 reply attaches the note to that entry', async () => {
+  const e = await setup()
+  await matureThreadItem(e)
+  const sent = await propose(e, ['a', 'b'])
+  await e.callback('pa:bad:1', sent.id)
+  const reply = e.api.last()
+  e.advance(3_600_000)
+  await e.text('Фидбек: слишком длинно, пропустил второй вопрос', reply.id)
+  await e.flush()
+
+  expect(e.state.feedback).toHaveLength(1)
+  expect(e.state.feedback[0]!.note).toBe('слишком длинно, пропустил второй вопрос')
+  expect(e.api.last().text).toBe('✍️ фидбек сохранён')
+  expect(e.notes.map((n) => n.meta.kind)).toEqual(['item'])
+})
+
+test('«N фидбек: …» without a 👎 in the last 24 h creates a new entry', async () => {
+  const e = await setup()
+  await matureThreadItem(e)
+  const sent = await propose(e, ['a', 'b'])
+  await e.callback('pa:bad:1', sent.id)
+  e.advance(25 * 3_600_000)
+  await e.text('1 fb: wrong tone')
+  expect(e.state.feedback).toHaveLength(2)
+  expect(e.state.feedback[0]!.note).toBeUndefined()
+  expect(e.state.feedback[1]).toMatchObject({ itemId: '1', note: 'wrong tone', variants: ['a', 'b'], source: 'channel' })
+  expect(e.api.last().text).toBe('✍️ фидбек сохранён')
+  await e.text('7 фидбек: нет такого')
+  expect(e.api.last().text).toBe('Не знаю айтем #7')
+  expect(e.state.feedback).toHaveLength(2)
+})
+
+test('feedback is capped at 500 entries, oldest dropped', async () => {
+  const e = await setup()
+  await matureThreadItem(e)
+  const sent = await propose(e, ['a', 'b'])
+  for (let i = 0; i < 500; i++) e.state.feedback.push({ itemId: `old${i}`, at: T0 - 1000 + i, source: 'im', channel: 'x' })
+  await e.callback('pa:bad:1', sent.id)
+  expect(e.state.feedback).toHaveLength(500)
+  expect(e.state.feedback[0]!.itemId).toBe('old1')
+  expect(e.state.feedback.at(-1)!.itemId).toBe('1')
+})
+
+test('prune never touches feedback, even for pruned items', async () => {
+  const DAY = 86_400_000
+  const state = emptyState()
+  state.items['1'] = {
+    id: '1', seq: 1, sub: 0, status: 'sent', source: 'im', channel: 'D1', author: 'U2', messages: [], context: [],
+    lastSeenTs: '1.000000', createdAt: T0 - 30 * DAY, lastMessageAt: T0 - 30 * DAY, telegram: {},
+  }
+  state.feedback = [{ itemId: '1', at: T0 - 30 * DAY, note: 'old', source: 'im', channel: 'D1' }]
+  const e = await setup({}, state)
+  await e.orch.tick()
+  expect(state.items['1']).toBeUndefined()
+  expect(state.feedback).toEqual([{ itemId: '1', at: T0 - 30 * DAY, note: 'old', source: 'im', channel: 'D1' }])
 })

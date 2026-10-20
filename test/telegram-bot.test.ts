@@ -291,3 +291,10 @@ test('edit falls back to plain text on a parse error; other errors propagate', a
   await expect(bot.edit(5, 'x')).rejects.toThrow('message is not modified')
   expect(logs).toHaveLength(1)
 })
+
+test('callback pa:bad:14 yields bad and acknowledges it with a toast', async () => {
+  const { bot, api, inbound } = setup()
+  await bot.ingest(callbackUpdate(31, 42, 42, 'pa:bad:14', 55))
+  expect(inbound).toEqual([{ cmd: { kind: 'bad', itemId: '14' }, messageId: 55, button: true }])
+  expect(api.of('answerCallbackQuery')).toEqual([{ method: 'answerCallbackQuery', args: ['cb31', { text: '👎 записал' }] }])
+})
