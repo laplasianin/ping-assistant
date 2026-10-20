@@ -15,7 +15,25 @@ DETACHED=0
 [ "$1" = "--detached" ] && DETACHED=1
 
 if ! "$TMUX_BIN" has-session -t "=$SESSION" 2>/dev/null; then
-  "$TMUX_BIN" new-session -d -s "$SESSION" -c "$REPO" -e "PATH=$RUN_PATH" "$REPO/bin/ping-assistant-up" || exit 1
+  # `env PATH=…` on the command itself: tmux's -e does not reach the first command of a fresh
+  # tmux server, which otherwise inherits a PATH without bun/claude.
+  "$TMUX_BIN" new-session -d -s "$SESSION" -c "$REPO" -e "PATH=$RUN_PATH" \
+    "env PATH='$RUN_PATH' '$REPO/bin/ping-assistant-up'" || exit 1
+  # Claude Code asks an interactive "I am using this for local development" confirmation for
+  # --dangerously-load-development-channels; nobody is at the keyboard under launchd, so answer it.
+  echo "ping-assistant-session: waiting for the dev-channels prompt" >&2
+  i=0
+  while [ $i -lt 240 ]; do
+    # pane targets take "session:" (the "=name" exact form is only for session targets)
+    if "$TMUX_BIN" capture-pane -p -t "$SESSION:" 2>/dev/null | grep -q 'local development'; then
+      "$TMUX_BIN" send-keys -t "$SESSION:" Enter
+      echo "ping-assistant-session: dev-channels prompt confirmed" >&2
+      break
+    fi
+    sleep 0.5
+    i=$((i + 1))
+  done
+  [ $i -ge 240 ] && echo "ping-assistant-session: prompt not seen within 120s" >&2
 fi
 [ "$DETACHED" = 1 ] && exit 0
 
