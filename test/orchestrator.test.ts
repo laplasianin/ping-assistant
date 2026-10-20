@@ -5,7 +5,8 @@ import { z } from 'zod'
 import { Channel } from '../src/channel'
 import type { Config } from '../src/config'
 import { slackify } from '../src/format'
-import { Orchestrator } from '../src/orchestrator'
+import { Orchestrator, type OrchestratorDeps } from '../src/orchestrator'
+import { ReferenceFetcher, type FetchLike, type GhRunner } from '../src/references'
 import type { RawMsg, SlackClient } from '../src/slack/client'
 import { Collector, type Collected, type TickResult } from '../src/slack/collector'
 import * as items from '../src/items'
@@ -97,6 +98,7 @@ async function setup(
   cfgOverrides: Partial<Config> = {}, state: State = emptyState(),
   realCollector?: (slack: FakeSlack, cfg: Config) => Collector,
   socket?: { isConnected(): boolean; epoch(): number; reconnect(reason: string): void; lastFrameAt(): number | undefined },
+  extra: Partial<OrchestratorDeps> = {},
 ) {
   const cfg = { ...baseCfg, ...cfgOverrides }
   const slack = new FakeSlack()
@@ -109,7 +111,7 @@ async function setup(
   let channel!: Channel
   const orch = new Orchestrator({
     cfg, store, state, slack: slack as unknown as SlackClient, collector: (realCollector?.(slack, cfg) ?? collector) as never, tg,
-    channel: { notify: (c: string, m: Record<string, string>) => channel.notify(c, m) } as Channel, now: () => clock, socket,
+    channel: { notify: (c: string, m: Record<string, string>) => channel.notify(c, m) } as Channel, now: () => clock, socket, ...extra,
   })
   channel = new Channel(orch.handlers())
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
@@ -1435,5 +1437,103 @@ test('a failing review notify is retried at most once a minute and logged once p
     expect(attempts).toBe(3)
   } finally {
     spy.mockRestore()
+  }
+})
+
+// --- references enrichment ---
+
+const PR_15110 = {
+  title: 'PF-4282. Tax id event', state: 'closed', merged: true, draft: false, user: { login: 'Andrei' },
+  updated_at: '2026-10-14T11:17:33Z', head: { ref: 'feature/PF-4282', sha: 'abc' }, html_url: 'https://github.com/scentbird/scentbird/pull/15110',
+}
+const ISSUE_4282 = { fields: { summary: 'Tax <id>', status: { name: 'In QA' }, assignee: { displayName: 'Philipp K' }, updated: '2026-10-19', comment: { comments: [] } } }
+
+function refFakes() {
+  const ghCalls: string[][] = []
+  const fetchCalls: string[] = []
+  const gh: GhRunner = async (args) => {
+    ghCalls.push(args)
+    if (args[1] === 'repos/scentbird/scentbird/pulls/15110') return JSON.stringify(PR_15110)
+    if (args[1]?.startsWith('repos/scentbird/scentbird/commits/abc/check-runs')) return JSON.stringify({ check_runs: [{ status: 'completed', conclusion: 'success' }] })
+    throw new Error('not found')
+  }
+  const fetch: FetchLike = async (url) => {
+    fetchCalls.push(url)
+    return { ok: url.includes('PF-4282'), status: url.includes('PF-4282') ? 200 : 404, json: async () => ISSUE_4282 }
+  }
+  return { gh, fetch, ghCalls, fetchCalls }
+}
+
+const REF_TEXT = 'Глянь PF-4282 и https://github.com/scentbird/scentbird/pull/15110, почему не задеплоено?'
+
+test('matured item with a Jira key and a PR URL: item JSON carries fetched references, Telegram shows 🔗 lines', async () => {
+  const f = refFakes()
+  const references = new ReferenceFetcher({ gh: f.gh, fetch: f.fetch, jira: { site: 'scentbird.atlassian.net', email: 'e', token: 't' }, now: () => T0 })
+  const e = await setup({}, emptyState(), undefined, undefined, { references })
+  await matureThreadItem(e, REF_TEXT)
+  const body = JSON.parse(e.notes[0]!.content)
+  expect(body.references).toEqual({
+    jira: [{ key: 'PF-4282', url: 'https://scentbird.atlassian.net/browse/PF-4282', summary: 'Tax <id>', status: 'In QA', assignee: 'Philipp K', updated: '2026-10-19' }],
+    prs: [{
+      url: 'https://github.com/scentbird/scentbird/pull/15110', repo: 'scentbird/scentbird', number: 15110, title: 'PF-4282. Tax id event',
+      state: 'merged', author: 'Andrei', updated: '2026-10-14T11:17:33Z', branch: 'feature/PF-4282', checks: { success: 1, failure: 0, pending: 0 },
+    }],
+    unresolved: [],
+  })
+  expect(e.state.items['1']!.references!.fetchedAt).toBe(T0)
+
+  const sent = await propose(e, ['a', 'b'])
+  expect(sent.text).toContain('🔗 <a href="https://scentbird.atlassian.net/browse/PF-4282">PF-4282</a> · In QA · Philipp')
+  expect(sent.text).toContain('🔗 <a href="https://github.com/scentbird/scentbird/pull/15110">PR #15110</a> · merged · Andrei')
+
+  // revise reuses the stored references: no new lookup
+  const before = f.ghCalls.length + f.fetchCalls.length
+  e.notes.length = 0
+  await e.text('2, но короче', sent.id)
+  await e.flush()
+  expect(JSON.parse(e.notes[0]!.content).references.prs[0].number).toBe(15110)
+  expect(f.ghCalls.length + f.fetchCalls.length).toBe(before)
+})
+
+test('without Jira credentials the key is unresolved and Jira is never called; nothing detected → no references', async () => {
+  const f = refFakes()
+  const e = await setup({}, emptyState(), undefined, undefined, { references: new ReferenceFetcher({ gh: f.gh, fetch: f.fetch, now: () => T0 }) })
+  await matureThreadItem(e, REF_TEXT)
+  const body = JSON.parse(e.notes[0]!.content)
+  expect(body.references.jira).toEqual([])
+  expect(body.references.unresolved).toEqual(['PF-4282'])
+  expect(body.references.prs).toHaveLength(1)
+  expect(f.fetchCalls).toEqual([])
+  e.orch.stop()
+
+  const plain = await setup()
+  await matureThreadItem(plain)
+  expect(JSON.parse(plain.notes[0]!.content).references).toBeUndefined()
+})
+
+test('a follow-up reuses fresh references from its thread and refetches stale ones', async () => {
+  for (const [age, refetched] of [[10 * 60_000, false], [31 * 60_000, true]] as const) {
+    const f = refFakes()
+    const state = emptyState()
+    const prRef = { url: PR_15110.html_url, repo: 'scentbird/scentbird', number: 15110, title: 'cached', state: 'open' as const, author: 'x', updated: 'u', branch: 'b' }
+    state.items['1'] = {
+      id: '1', seq: 1, sub: 0, status: 'sent', source: 'channel', channel: 'C1', threadTs: '100.000000', author: 'U2',
+      messages: [threadMsg('101.000000', 'PR https://github.com/scentbird/scentbird/pull/15110')], context: [], lastSeenTs: '101.000000',
+      createdAt: T0 - age, lastMessageAt: T0 - age, telegram: {}, references: { jira: [], prs: [prRef], unresolved: [], fetchedAt: T0 - age },
+    }
+    state.nextSeq = 2
+    state.watchedThreads['C1:100.000000'] = { until: T0 + 86_400_000 }
+    const e = await setup({}, state, undefined, undefined, { references: new ReferenceFetcher({ gh: f.gh, now: () => T0 }) })
+    e.slack.repl['C1:100.000000'] = [{ ts: '101.000000', user: 'U2', text: 'PR https://github.com/scentbird/scentbird/pull/15110' }]
+    e.collector.queue.push({ msg: threadMsg('105.000000', 'ну что там?', 'U4'), source: 'channel' })
+    await e.orch.tick()
+    e.advance(91_000)
+    await e.orch.tick()
+    await e.flush()
+    const body = JSON.parse(e.notes[0]!.content)
+    expect(body.id).toBe('1.1')
+    expect(body.references.prs[0].title).toBe(refetched ? 'PF-4282. Tax id event' : 'cached')
+    expect(f.ghCalls.length > 0).toBe(refetched)
+    e.orch.stop()
   }
 })

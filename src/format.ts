@@ -193,6 +193,7 @@ export function renderItem(
   const top = [header]
   const q = quote(item.messages, users, channels)
   if (q) top.push(q)
+  top.push(...referenceLines(item))
   const permalink = item.messages[0]?.permalink
   if (permalink) top.push(isWebUrl(permalink) ? link(permalink, 'Открыть в Slack') : escapeHtml(permalink))
   const parts = [top.join('\n')]
@@ -207,6 +208,21 @@ export function renderItem(
     { label: 'Пропустить', data: callbackData({ kind: 'skip', itemId: item.id }) },
   ], ...feedbackKeyboard(item.id)]
   return { text: parts.join('\n\n'), keyboard }
+}
+
+/** At most this many 🔗 lines under an item's quote. */
+const REF_LINES_MAX = 3
+
+/** One compact line per fetched reference (Jira first, then PRs): «🔗 PF-4282 · In QA · Philipp», «🔗 PR #15110 · merged · login». */
+export function referenceLines(item: Pick<Item, 'references'>): string[] {
+  const r = item.references
+  if (!r) return []
+  const line = (url: string, label: string, ...rest: (string | null | undefined)[]): string =>
+    ['🔗 ' + link(url, label), ...rest.filter((x): x is string => !!x).map((x) => escapeHtml(x.length > 40 ? `${x.slice(0, 40)}…` : x))].join(' · ')
+  return [
+    ...r.jira.map((j) => line(j.url, j.key, j.status, j.assignee?.split(/\s+/)[0])),
+    ...r.prs.map((p) => line(p.url, `PR #${p.number}`, p.state, p.author)),
+  ].slice(0, REF_LINES_MAX)
 }
 
 const quoted = (title: string, msgs: SlackMsg[], users: Users, channels: Users): string =>

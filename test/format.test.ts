@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { chunk, escapeHtml, humanizeSlack, outcome, renderItem, renderProposal, renderThreadChanged, renderUpdate, slackify, slackToHtml, stripHtml } from '../src/format'
+import type { References } from '../src/references'
 import type { Item, SlackMsg } from '../src/state'
 
 const NOW = 1_760_800_000_000
@@ -265,5 +266,33 @@ describe('feedback button', () => {
     expect(datas(renderProposal(item(), 'x').keyboard)).not.toContain('pa:bad:14')
     expect(renderThreadChanged(item(), [msg('n')]).keyboard).toHaveLength(1)
     expect(datas(renderThreadChanged(item(), [msg('n')]).keyboard)).not.toContain('pa:bad:14')
+  })
+})
+
+describe('reference lines', () => {
+  const refs = (n: number): References => ({
+    jira: Array.from({ length: n }, (_, i) => ({
+      key: `PF-${i + 1}`, url: `https://j/browse/PF-${i + 1}`, summary: 's', status: 'In <QA>', assignee: 'Philipp & Co', updated: 'u',
+    })),
+    prs: [{ url: 'https://github.com/a/b/pull/7', repo: 'a/b', number: 7, title: 't', state: 'merged', author: 'an<dr>ei', updated: 'u', branch: 'x' }],
+    unresolved: ['XX-1'], fetchedAt: NOW,
+  })
+
+  test('🔗 lines sit under the quote, linked and escaped', () => {
+    const { text } = renderItem(item({ references: refs(1) }), { U2: 'Bob' }, {}, NOW)
+    expect(text.split('\n\n')[0]).toBe([
+      '<b>#14</b> · #pathfinders · Max Darski · 5 мин назад',
+      '<blockquote expandable>Привет, @Bob!</blockquote>',
+      '🔗 <a href="https://j/browse/PF-1">PF-1</a> · In &lt;QA&gt; · Philipp',
+      '🔗 <a href="https://github.com/a/b/pull/7">PR #7</a> · merged · an&lt;dr&gt;ei',
+      '<a href="https://slack/p1">Открыть в Slack</a>',
+    ].join('\n'))
+  })
+
+  test('at most 3 lines; unresolved and empty references show nothing', () => {
+    const { text } = renderItem(item({ references: refs(5) }), {}, {}, NOW)
+    expect(text.match(/🔗/g)).toHaveLength(3)
+    expect(text).not.toContain('PR #7')
+    expect(renderItem(item({ references: { jira: [], prs: [], unresolved: ['PF-1'], fetchedAt: NOW } }), {}, {}, NOW).text).not.toContain('🔗')
   })
 })

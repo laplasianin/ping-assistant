@@ -4,8 +4,9 @@ import type { Channel, ChannelHandlers } from './channel'
 import { callbackData, type Command } from './commands'
 import type { Config, ReviewCron } from './config'
 import { escapeHtml, outcome, renderItem, renderProposal, renderThreadChanged, renderUpdate, slackify, type Keyboard } from './format'
-import { ItemMessages, itemJson, lastPart, msgJson, withoutHint } from './item-messages'
+import { ItemMessages, itemJson, lastPart, msgJson, referencesJson, withoutHint } from './item-messages'
 import { ingest, mature, prune } from './items'
+import { detectReferences, ReferenceFetcher, type References } from './references'
 import type { RawMsg, SlackClient } from './slack/client'
 import { applyCursors, cmpTs, type Collector } from './slack/collector'
 import type { SlackSocket } from './slack/socket'
@@ -17,6 +18,8 @@ export type OrchestratorDeps = {
   collector: Pick<Collector, 'tick'> & Partial<Pick<Collector, 'socketConnected' | 'socketEpoch'>>; tg: TelegramBot; channel: Pick<Channel, 'notify'>; now?: () => number
   /** Socket Mode: ticks every drainSeconds and mostly drain the socket queue; polling reconciles every socketReconcileTicks. */
   socket?: Pick<SlackSocket, 'isConnected' | 'epoch' | 'reconnect' | 'lastFrameAt'> & Partial<Pick<SlackSocket, 'gaveUp'>>
+  /** Jira/PR lookups before an item is delivered; without it every detected reference is left unresolved. */
+  references?: Pick<ReferenceFetcher, 'fetch'>
 }
 
 const CLOSED: ItemStatus[] = ['sent', 'skipped', 'answered_manually']
@@ -40,6 +43,8 @@ const FEEDBACK_LIST_MAX = 50
 const FEEDBACK_DAYS_MAX = 90
 /** A failed feedback-review notify is retried no sooner than this. */
 const REVIEW_RETRY_MS = 60_000
+/** Fetched references younger than this are reused (re-delivery, follow-ups in the same thread). */
+const REFERENCES_TTL_MS = 30 * 60_000
 
 /** The latest scheduled review moment at or before now, in local time (DST-safe: built from local fields). */
 export function lastReviewMoment(now: number, cron: ReviewCron): number {
@@ -62,10 +67,12 @@ export class Orchestrator {
   private lastPrune: number | undefined
   /** Feedback review notify failed: no new attempt before this; set only during a failure streak. */
   private reviewRetryAt: number | undefined
+  private readonly refs: Pick<ReferenceFetcher, 'fetch'>
 
   constructor(private readonly d: OrchestratorDeps) {
     this.now = d.now ?? Date.now
     this.msgs = new ItemMessages(d.tg)
+    this.refs = d.references ?? new ReferenceFetcher()
   }
 
   start(): void {
@@ -282,7 +289,10 @@ export class Orchestrator {
     if (c.kind === 'forward') {
       const item = c.itemId ? state.items[c.itemId] : undefined
       if (item) {
-        const body = { id: item.id, request: c.text, variants: item.variants ?? [], analysis: item.analysis ?? '' }
+        const body = {
+          id: item.id, request: c.text, variants: item.variants ?? [], analysis: item.analysis ?? '',
+          ...(item.references ? { references: referencesJson(item.references) } : {}), // as fetched at delivery: no refetch
+        }
         await this.d.channel.notify(JSON.stringify(body), { kind: 'revise', item_id: item.id })
       } else {
         await this.d.channel.notify(JSON.stringify({ text: c.text, ...(c.itemId ? { itemId: c.itemId } : {}) }), { kind: 'chat' })
@@ -538,11 +548,31 @@ export class Orchestrator {
   private async deliver(item: Item): Promise<void> {
     item.channelName ??= this.d.state.channels[item.channel]
     item.context = await this.context(item)
+    await this.enrich(item)
     try {
       await this.d.channel.notify(JSON.stringify(itemJson(item)), { kind: 'item', item_id: item.id })
     } catch (err) {
       item.status = 'settling' // matures again on the next tick
       log(`notify item failed: ${errName(err)}`)
+    }
+  }
+
+  /**
+   * Jira keys and PRs in the item's messages and context, looked up (bounded, best effort) before delivery.
+   * Fresh references of the item itself or of an item in the same thread (seq) are reused, not refetched.
+   */
+  private async enrich(item: Item): Promise<void> {
+    const detected = detectReferences([...item.messages, ...item.context].map((m) => m.text), this.d.cfg.github.defaultRepo)
+    if (!detected.jira.length && !detected.prs.length) { item.references = undefined; return }
+    const now = this.now()
+    const cached = [item, ...Object.values(this.d.state.items).filter((i) => i.seq === item.seq && i !== item)]
+      .map((i) => i.references)
+      .filter((r): r is References => r !== undefined && now - r.fetchedAt < REFERENCES_TTL_MS)
+      .sort((a, b) => b.fetchedAt - a.fetchedAt)[0]
+    try {
+      item.references = await this.refs.fetch(detected, cached)
+    } catch (err) {
+      log(`references failed: ${errName(err)}`)
     }
   }
 

@@ -14,5 +14,7 @@
   "dryRun": false,
   "selfDmTest": false,
   "feedbackReviewCron": { "weekday": 1, "hour": 9, "minute": 30 },
+  "github": { "defaultRepo": "scentbird/scentbird" },
+  "jira": { "site": "scentbird.atlassian.net" },
   "statePath": "~/.config/ping-assistant/state.json"
 }

@@ -67,7 +67,12 @@
   "messages": [{ "ts": "…", "user": "U…", "userName": "…", "text": "…", "files": [{ "id": "…", "name": "…", "path": "/abs/path.png" }] }],
   "context": [ /* весь тред или последние сообщения лички до айтема, тот же формат */ ],
   "permalink": "https://…slack.com/archives/…",
-  "files": [{ "id": "…", "name": "…", "path": "/abs/path.png" }]
+  "files": [{ "id": "…", "name": "…", "path": "/abs/path.png" }],
+  "references": {
+    "jira": [{ "key": "PF-4282", "url": "https://scentbird.atlassian.net/browse/PF-4282", "summary": "…", "status": "In QA", "assignee": "… | null", "updated": "…", "lastComment": { "author": "…", "text": "первые 300 символов" } }],
+    "prs": [{ "url": "https://github.com/…/pull/15110", "repo": "scentbird/scentbird", "number": 15110, "title": "…", "state": "open | merged | closed | draft", "author": "login", "updated": "…", "branch": "…", "checks": { "success": 5, "failure": 0, "pending": 1 } }],
+    "unresolved": ["PF-4300", "https://github.com/…/pull/7"]
+  }
 }
 ```
 
@@ -75,9 +80,23 @@
 `path`, прочитай его через `Read` (скриншоты часто содержат сам вопрос). `followup` — новая
 реплика в наблюдаемом треде (id вида `14.2`).
 
+`references` есть, только если в `messages`/`context` нашлись ключи Jira или PR (ссылки
+`github.com/…/pull/N` и «PR #N»). Сервер уже сходил за ними перед доставкой (не дольше ~6 с):
+`jira`/`prs` — свежие данные, `unresolved` — найдено, но не получено (нет доступа, таймаут,
+ошибка). `checks` и `lastComment` могут отсутствовать. В `revise` приходят те же `references`.
+
+**Правила для `references`:**
+
+- Сначала используй то, что пришло в `references`: статус, исполнитель, мёрж PR, проверки.
+  Не запрашивай повторно через MCP то, что уже есть.
+- `unresolved` смотри через Atlassian MCP (`getJiraIssue`) или по ссылке на PR, только
+  если это нужно для ответа на вопрос; ключ, упомянутый мимоходом, не ищи.
+- Если статус или исполнитель важны для ответа («почему не задеплоено?», «кто делает?»), назови
+  их в `analysis` и при необходимости в вариантах: «PF-4282 в In QA у Philipp», «PR #15110 смёржен».
+
 **`update`** — тот же автор дописал к айтему, который ждёт решения Ильи: `{ "id": "14", "newMessages": [ … ] }`.
 
-**`revise`** — Илья попросил переделать: `{ "id": "14", "request": "2, но без тикета", "variants": [ … ], "analysis": "…" }`.
+**`revise`** — Илья попросил переделать: `{ "id": "14", "request": "2, но без тикета", "variants": [ … ], "analysis": "…", "references": { … } }` (`references` — если были у айтема).
 
 **`chat`** — свободный текст Ильи: `{ "text": "…", "itemId": "14" }` (`itemId` есть, если он ответил цитатой на айтем).
 

@@ -1,5 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
+import type { References } from './references'
 
 /** msgIndex value for a seen message that is in no item (Ilya's own, or user-less): dedup only. */
 export const OWN_MSG = 'own'
@@ -19,6 +20,7 @@ export type Item = {
   telegram: { messageId?: number; proposalMessageId?: number; warningMessageId?: number; warningText?: string; text?: string; chosen?: number; triageAlerted?: boolean };
   ignoreReason?: string; sentTs?: string;
   sentChoice?: number | 'custom';            // what was sent: variant N or Ilya's own text (kept for feedback)
+  references?: References;                   // Jira/PR lookups at delivery, reused by revise and fresh follow-ups
 }
 /** A 👎 on an item or a «фидбек: …» note; snapshot of what the session proposed. Never pruned, capped at FEEDBACK_MAX. */
 export type FeedbackEntry = {

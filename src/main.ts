@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { Channel } from './channel'
 import { loadConfig, loadSecrets } from './config'
 import { Orchestrator } from './orchestrator'
+import { ReferenceFetcher, spawnGh } from './references'
 import { SlackClient } from './slack/client'
 import { Collector } from './slack/collector'
 import { SlackSocket } from './slack/socket'
@@ -38,11 +39,17 @@ const socket = secrets.slackAppToken
   ? new SlackSocket(secrets.slackAppToken, { onEvent: (raw) => collector.enqueue(raw, raw.channelType), onHello: () => reporter.slackHello() })
   : undefined
 if (!socket) log('SLACK_APP_TOKEN not set, polling only')
+// Item references: PRs through the gh CLI, Jira through REST only with JIRA_EMAIL + JIRA_API_TOKEN (else the session's MCP).
+const references = new ReferenceFetcher({
+  gh: spawnGh(), fetch: (url, init) => fetch(url, init),
+  ...(secrets.jiraEmail && secrets.jiraApiToken ? { jira: { site: cfg.jira.site, email: secrets.jiraEmail, token: secrets.jiraApiToken } } : {}),
+})
+if (!secrets.jiraEmail || !secrets.jiraApiToken) log('JIRA_EMAIL/JIRA_API_TOKEN not set, Jira keys left to the session')
 
 // The channel needs the orchestrator's handlers and the orchestrator needs channel.notify.
 let channel: Channel | undefined
 const orchestrator = new Orchestrator({
-  cfg, store, state, slack, collector, tg, socket,
+  cfg, store, state, slack, collector, tg, socket, references,
   channel: { notify: (content, meta) => channel!.notify(content, meta) },
 })
 channel = new Channel(orchestrator.handlers())

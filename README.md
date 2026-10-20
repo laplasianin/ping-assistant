@@ -59,12 +59,17 @@ SLACK_USER_TOKEN=xoxp-…
 TELEGRAM_BOT_TOKEN=123456:…
 # необязательно: Socket Mode
 SLACK_APP_TOKEN=xapp-…
+# необязательно: статусы Jira-тикетов в айтемах (токен: id.atlassian.com → Security → API tokens)
+JIRA_EMAIL=you@scentbird.ai
+JIRA_API_TOKEN=…
 ```
 
 Комментарий в конце строки отделяется пробелом: `KEY=value # …`. Без `SLACK_APP_TOKEN` сервер пишет в stderr `ping-assistant: SLACK_APP_TOKEN not set, polling only`
 и работает только опросом.
 
-Те же переменные из окружения имеют приоритет над файлом.
+Те же переменные из окружения имеют приоритет над файлом. Без пары `JIRA_EMAIL` + `JIRA_API_TOKEN`
+сервер не ходит в Jira (в stderr `JIRA_EMAIL/JIRA_API_TOKEN not set, Jira keys left to the session`):
+ключи тикетов сессия смотрит сама через Atlassian MCP.
 
 ### Конфиг
 
@@ -92,6 +97,8 @@ cp ping-assistant.config.example.json ping-assistant.config.json
 | `feedbackReviewCron` | когда присылать сессии недельный разбор фидбека: `{ "weekday": 1, "hour": 9, "minute": 30 }` — понедельник 09:30 по системной таймзоне (`weekday`: 0 = воскресенье … 6 = суббота). Если за 7 дней фидбека нет, разбора нет |
 | `selfDmTest` | только вместе с `dryRun: true`: сообщения в личке с самим собой считаются чужими, чтобы тестировать без коллег (`false`) |
 | `statePath` | файл состояния (`~/.config/ping-assistant/state.json`) |
+| `github` | `{ "defaultRepo": "scentbird/scentbird" }`: в каком репозитории искать PR, упомянутый как «PR #15110» без ссылки |
+| `jira` | `{ "site": "scentbird.atlassian.net" }`: хост Jira для ссылок и REST-запросов |
 
 **Начинай с `"dryRun": true`.**
 
@@ -199,6 +206,18 @@ bin/ping-assistant-up
 
 Спросить сессию, что отсеяно: «что ты проигнорировал за сегодня?» (инструмент `list_ignored`,
 список с причинами); «что висит?» — `list_items`.
+
+### Как работает: ссылки на тикеты и PR
+
+Перед доставкой айтема сервер ищет в его сообщениях и контексте ключи Jira (`PF-4282`, до 5) и
+PR (`https://github.com/<owner>/<repo>/pull/<n>`, а также `#15110` в строке со словом PR/пр/pull —
+тогда из `github.defaultRepo`, до 5) и за ~6 с суммарно получает их статус: PR — через `gh api`
+(нужен установленный и залогиненный `gh`, иначе PR пропускаются, в логе один раз
+`references: gh unavailable, PRs omitted`), Jira — через REST, только с `JIRA_EMAIL`/`JIRA_API_TOKEN`.
+Результат уходит сессии в `references` айтема (то, что получить не удалось, — в `unresolved`),
+хранится в айтеме (повторно используется в `revise` и в follow-up в течение 30 минут), а в
+Telegram под цитатой появляются до трёх строк вида `🔗 PF-4282 · In QA · Philipp`. Ошибки
+пишутся в лог только именем, доставку они не задерживают дольше этого бюджета.
 
 ## Автозапуск и иконка
 
