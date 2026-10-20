@@ -86,7 +86,7 @@ const baseCfg: Config = {
   userId: 'ME', watchChannels: ['C1'], telegramChatId: String(CHAT), pollSeconds: 3600, settleSeconds: 90,
   maxSettleSeconds: 300, followUpDays: 7, contextMessages: 30, triageTimeoutSeconds: 600, scentbirdRepoPath: '/tmp', dryRun: false,
   statePath: '/tmp/ping-assistant-test/state.json', drainSeconds: 5, socketReconcileTicks: 10,
-  feedbackReviewCron: { weekday: 1, hour: 9, minute: 30 }, github: { defaultRepo: 'scentbird/scentbird' }, jira: { site: 'scentbird.atlassian.net' },
+  feedbackReviewCron: { weekday: 1, hour: 9, minute: 30 }, briefing: { hour: 9, minute: 30, weekdays: [1, 2, 3, 4, 5] }, github: { defaultRepo: 'scentbird/scentbird' }, jira: { site: 'scentbird.atlassian.net' },
 }
 
 let stderr: ReturnType<typeof spyOn>
@@ -1548,4 +1548,162 @@ test('remember_thread on an unknown item is an error and stores nothing', async 
   const res = await e.client.callTool({ name: 'remember_thread', arguments: { item_id: '404', agreements: 'x' } })
   expect(res.isError).toBe(true)
   expect(e.state.threads).toEqual({})
+})
+
+// --- morning briefing ---
+
+const MIN_MS = 60_000
+const HOUR_MS = 60 * MIN_MS
+const DAY_MS = 24 * HOUR_MS
+const briefings = (e: Awaited<ReturnType<typeof setup>>) => e.notes.filter((n) => n.meta.kind === 'briefing')
+
+test('briefing fires once at the configured weekday moment, then waits for the next one', async () => {
+  const e = await setup()
+  // T0 is Monday 2026-10-19 (after 09:30 local); the first tick only arms the schedule.
+  await e.orch.tick()
+  await e.flush()
+  expect(e.state.lastBriefingAt).toBe(T0)
+  expect(briefings(e)).toEqual([])
+
+  const moment = local(2026, 9, 20, 9, 30) // Tuesday
+  e.advance(moment - MIN_MS - T0)
+  await e.orch.tick()
+  await e.flush()
+  expect(briefings(e)).toEqual([])
+
+  e.advance(MIN_MS)
+  await e.orch.tick()
+  await e.flush()
+  expect(briefings(e)).toHaveLength(1)
+  expect(briefings(e)[0]!.meta).toEqual({ kind: 'briefing', source: 'ping-assistant' })
+  const body = JSON.parse(briefings(e)[0]!.content)
+  expect(body.since).toBe(new Date(T0).toISOString()) // the previous run is later than 24 h ago
+  expect(body.today).toBe('2026-10-20')
+  expect(e.state.lastBriefingAt).toBe(moment)
+
+  for (let i = 0; i < 3; i++) { e.advance(HOUR_MS); await e.orch.tick() }
+  await e.flush()
+  expect(briefings(e)).toHaveLength(1)
+
+  e.advance(local(2026, 9, 21, 9, 30) - (moment + 3 * HOUR_MS)) // Wednesday
+  await e.orch.tick()
+  await e.flush()
+  expect(briefings(e)).toHaveLength(2)
+  expect(JSON.parse(briefings(e)[1]!.content).since).toBe(new Date(local(2026, 9, 20, 9, 30)).toISOString())
+})
+
+test('no briefing on a weekend; Monday gets one', async () => {
+  const state = emptyState()
+  const friday = local(2026, 9, 23, 9, 31)
+  state.lastBriefingAt = friday
+  const e = await setup({}, state)
+  e.advance(local(2026, 9, 24, 9, 31) - T0) // Saturday
+  await e.orch.tick()
+  e.advance(DAY_MS) // Sunday
+  await e.orch.tick()
+  await e.flush()
+  expect(briefings(e)).toEqual([])
+  expect(state.lastBriefingAt).toBe(friday)
+  e.advance(DAY_MS) // Monday 09:31
+  await e.orch.tick()
+  await e.flush()
+  expect(briefings(e)).toHaveLength(1)
+  expect(JSON.parse(briefings(e)[0]!.content).since).toBe(new Date(local(2026, 9, 26, 9, 31) - DAY_MS).toISOString())
+})
+
+test('a briefing moment missed while asleep fires once on the first tick after it', async () => {
+  const state = emptyState()
+  state.lastBriefingAt = local(2026, 9, 15, 9, 31) // Thursday; Friday and Monday were missed
+  const e = await setup({}, state)
+  const wake = local(2026, 9, 19, 12, 0)
+  e.advance(wake - T0)
+  await e.orch.tick()
+  e.advance(MIN_MS)
+  await e.orch.tick()
+  await e.flush()
+  expect(briefings(e)).toHaveLength(1)
+  expect(state.lastBriefingAt).toBe(wake)
+})
+
+test('a failing briefing notify is retried at most once a minute and logged once per failure streak', async () => {
+  const state = emptyState()
+  state.lastBriefingAt = local(2026, 9, 16, 9, 31)
+  state.lastFeedbackReviewAt = T0 + DAY_MS // keep the review out of it
+  const e = await setup({}, state)
+  e.advance(local(2026, 9, 19, 12, 0) - T0)
+  let attempts = 0
+  let fail = true
+  const real = Channel.prototype.notify
+  const spy = spyOn(Channel.prototype, 'notify').mockImplementation(async function (this: Channel, c: string, m: Record<string, string>) {
+    if (m.kind !== 'briefing') return real.call(this, c, m)
+    attempts++
+    if (fail) throw new Error('session gone')
+  })
+  const failures = () => stderr.mock.calls.filter((c: unknown[]) => String(c[0]).includes('notify briefing failed')).length
+  try {
+    await e.orch.tick()
+    expect(attempts).toBe(1)
+    for (let i = 0; i < 11; i++) { e.advance(5_000); await e.orch.tick() } // 55 s later
+    expect(attempts).toBe(1)
+    e.advance(5_000)
+    await e.orch.tick() // 60 s after the failure
+    expect(attempts).toBe(2)
+    expect(failures()).toBe(1)
+    expect(state.lastBriefingAt).toBe(local(2026, 9, 16, 9, 31))
+    fail = false
+    e.advance(60_000)
+    await e.orch.tick()
+    expect(attempts).toBe(3)
+    expect(state.lastBriefingAt).toBe(local(2026, 9, 19, 12, 2))
+    e.advance(60_000)
+    await e.orch.tick()
+    expect(attempts).toBe(3)
+    expect(failures()).toBe(1)
+  } finally {
+    spy.mockRestore()
+  }
+})
+
+test('«брифинг» in chat sends the briefing now without moving the schedule; closed items carry closedAt', async () => {
+  const e = await setup()
+  await e.orch.tick()
+  await matureThreadItem(e)
+  e.advance(MIN_MS)
+  const res = await e.client.callTool({ name: 'ignore', arguments: { item_id: '1', reason: 'благодарность' } })
+  expect(res.isError).toBeFalsy()
+  expect(e.state.items['1']!.closedAt).toBe(T0 + 91_000 + MIN_MS)
+  e.state.feedback.push({ itemId: '1', at: T0, source: 'channel', channel: 'C1' })
+  e.advance(MIN_MS)
+  await e.text('Брифинг')
+  await e.flush()
+  expect(e.notes.filter((n) => n.meta.kind === 'chat')).toEqual([])
+  expect(briefings(e)).toHaveLength(1)
+  const body = JSON.parse(briefings(e)[0]!.content)
+  expect(body.ignored).toEqual([{ id: '1', channel: 'C1', author: 'User U2', reason: 'благодарность', at: new Date(T0 + 91_000 + MIN_MS).toISOString() }])
+  expect(body.feedback_count).toBe(1)
+  expect(e.state.lastBriefingAt).toBe(T0)
+  // Anything else is still chat.
+  await e.text('брифинг завтра?')
+  await e.flush()
+  expect(e.notes.filter((n) => n.meta.kind === 'chat')).toHaveLength(1)
+})
+
+test('sent, skipped and manually answered items record when they closed', async () => {
+  const e = await setup()
+  const item = await matureThreadItem(e)
+  const shown = await propose(e, ['Ответ'])
+  e.advance(MIN_MS)
+  await e.callback('pa:choose:1:1', shown.id)
+  expect(item.status).toBe('sent')
+  expect(item.closedAt).toBe(T0 + 91_000 + MIN_MS)
+
+  e.collector.queue.push({ msg: threadMsg('120.000000', 'Ещё вопрос', 'U5'), source: 'channel' })
+  await e.orch.tick()
+  e.advance(91_000)
+  await e.orch.tick()
+  const followup = Object.values(e.state.items).find((i) => i.id !== '1')!
+  await e.client.callTool({ name: 'propose', arguments: { item_id: followup.id, analysis: 'a', variants: ['x', 'y'], mode: 'variants' } })
+  await e.callback(`pa:skip:${followup.id}`, e.api.last().id)
+  expect(followup.status).toBe('skipped')
+  expect(followup.closedAt).toBe(T0 + 91_000 + MIN_MS + 91_000)
 })

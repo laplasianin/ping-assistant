@@ -1,6 +1,7 @@
 // Wires Slack collection, item state, Telegram and the MCP channel together.
 // Invariant: only sendToSlack calls slack.postMessage, and only on Ilya's command from Telegram.
 import type { Channel, ChannelHandlers } from './channel'
+import { briefingPayload, lastBriefingMoment } from './briefing'
 import { callbackData, type Command } from './commands'
 import type { Config, ReviewCron } from './config'
 import { escapeHtml, outcome, renderItem, renderProposal, renderThreadChanged, renderUpdate, slackify, type Keyboard } from './format'
@@ -44,6 +45,10 @@ const FEEDBACK_LIST_MAX = 50
 const FEEDBACK_DAYS_MAX = 90
 /** A failed feedback-review notify is retried no sooner than this. */
 const REVIEW_RETRY_MS = 60_000
+/** A failed briefing notify is retried no sooner than this. */
+const BRIEFING_RETRY_MS = 60_000
+/** A chat message that asks for the briefing now (the server builds it; the session cannot). */
+const BRIEFING_ASK = /^брифинг[.!?]?$/i
 /** Fetched references younger than this are reused (re-delivery, follow-ups in the same thread). */
 const REFERENCES_TTL_MS = 30 * 60_000
 
@@ -68,6 +73,8 @@ export class Orchestrator {
   private lastPrune: number | undefined
   /** Feedback review notify failed: no new attempt before this; set only during a failure streak. */
   private reviewRetryAt: number | undefined
+  /** Briefing notify failed: no new attempt before this; set only during a failure streak. */
+  private briefingRetryAt: number | undefined
   private readonly refs: Pick<ReferenceFetcher, 'fetch'>
 
   constructor(private readonly d: OrchestratorDeps) {
@@ -155,6 +162,7 @@ export class Orchestrator {
         if (prune(state, now, cfg)) dirty = true
       }
       if (await this.feedbackReview(now)) dirty = true
+      if (await this.briefing(now)) dirty = true
     } catch (err) {
       dirty = true
       log(`tick failed: ${errName(err)}`)
@@ -190,12 +198,14 @@ export class Orchestrator {
       ignore: async (id, reason) => {
         const item = this.openItem(id)
         item.status = 'ignored'
+        item.closedAt = this.now()
         item.ignoreReason = reason
         return done(`#${id} ignored`)
       },
       close: async (id) => {
         const item = this.openItem(id)
         item.status = 'skipped'
+        item.closedAt = this.now()
         item.pendingText = undefined
         await this.msgs.closeOriginal(item)
         return done(`#${id} closed`)
@@ -303,6 +313,7 @@ export class Orchestrator {
         }
         await this.d.channel.notify(JSON.stringify(body), { kind: 'revise', item_id: item.id })
       } else {
+        if (!c.itemId && BRIEFING_ASK.test(c.text.trim())) return this.sendBriefing(this.now())
         await this.d.channel.notify(JSON.stringify({ text: c.text, ...(c.itemId ? { itemId: c.itemId } : {}) }), { kind: 'chat' })
       }
       return
@@ -329,6 +340,7 @@ export class Orchestrator {
         return this.sendToSlack(item, item.pendingText, c.kind === 'force' || item.forceSend === true, item.telegram.chosen ?? 'custom')
       case 'skip':
         item.status = 'skipped'
+        item.closedAt = this.now()
         this.clearHeld(item)
         await this.msgs.retire(item)
         return this.msgs.closeOriginal(item)
@@ -420,6 +432,7 @@ export class Orchestrator {
       if (threadTs) this.watch(item, threadTs, item.sentTs)
     }
     item.status = 'sent'
+    item.closedAt = this.now()
     item.sentChoice = chosen
     this.clearHeld(item)
     await this.msgs.annotate(item, outcome(item, chosen))
@@ -488,6 +501,7 @@ export class Orchestrator {
   /** The pre-send check found Ilya's own reply: close the item instead of sending a second answer. */
   private async answeredMeanwhile(item: Item): Promise<void> {
     item.status = 'answered_manually'
+    item.closedAt = this.now()
     this.clearHeld(item)
     await this.msgs.retire(item)
     await this.msgs.closeOriginal(item)
@@ -529,6 +543,34 @@ export class Orchestrator {
     }
     state.lastFeedbackReviewAt = now
     return true
+  }
+
+  /**
+   * Once a configured weekday's briefing moment has passed since the last briefing, hands the session the briefing
+   * (kind briefing). Moments missed while asleep collapse into one. The first check only arms the schedule.
+   */
+  private async briefing(now: number): Promise<boolean> {
+    const { state, cfg } = this.d
+    if (state.lastBriefingAt === undefined) { state.lastBriefingAt = now; return true }
+    if (state.lastBriefingAt >= lastBriefingMoment(now, cfg.briefing)) return false
+    if (this.briefingRetryAt !== undefined && now < this.briefingRetryAt) return false
+    try {
+      await this.sendBriefing(now)
+    } catch (err) {
+      if (this.briefingRetryAt === undefined) log(`notify briefing failed: ${errName(err)}`) // once per streak
+      this.briefingRetryAt = now + BRIEFING_RETRY_MS
+      return false
+    }
+    this.briefingRetryAt = undefined
+    log('briefing sent')
+    state.lastBriefingAt = now
+    return true
+  }
+
+  /** The briefing since the last scheduled one (at most 24 h back); an on-demand one leaves the schedule alone. */
+  private async sendBriefing(now: number): Promise<void> {
+    const { state, cfg } = this.d
+    await this.d.channel.notify(JSON.stringify(briefingPayload(state, cfg, now, state.lastBriefingAt)), { kind: 'briefing' })
   }
 
   /** Items the session has not answered for triageTimeoutSeconds: remind Ilya once and nudge the session again. */

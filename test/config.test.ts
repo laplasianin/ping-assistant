@@ -147,6 +147,19 @@ test('feedbackReviewCron accepts an explicit moment and rejects an impossible on
   expect(() => loadConfig(writeJson({ ...base, feedbackReviewCron: { weekday: 1, hour: 24, minute: 0 } }))).toThrow(/feedbackReviewCron/)
 })
 
+test('briefing defaults to weekdays 09:30 and fills omitted fields', () => {
+  expect(loadConfig(writeJson(base)).briefing).toEqual({ hour: 9, minute: 30, weekdays: [1, 2, 3, 4, 5] })
+  expect(loadConfig(writeJson({ ...base, briefing: { hour: 8 } })).briefing).toEqual({ hour: 8, minute: 30, weekdays: [1, 2, 3, 4, 5] })
+  expect(loadConfig(writeJson({ ...base, briefing: { hour: 10, minute: 5, weekdays: [0, 6] } })).briefing)
+    .toEqual({ hour: 10, minute: 5, weekdays: [0, 6] })
+})
+
+test('briefing rejects an impossible time, an unknown weekday, no weekdays and repeated weekdays', () => {
+  for (const briefing of [
+    { hour: 24 }, { minute: 60 }, { hour: 9.5 }, { weekdays: [7] }, { weekdays: [-1] }, { weekdays: [] }, { weekdays: [1, 1] },
+  ]) expect(() => loadConfig(writeJson({ ...base, briefing }))).toThrow(/briefing/)
+})
+
 test('loadConfig keeps github.defaultRepo and jira.site, and rejects a malformed repo', () => {
   const cfg = loadConfig(writeJson({ ...base, github: { defaultRepo: 'acme/tool' }, jira: { site: 'acme.atlassian.net' } }))
   expect(cfg.github.defaultRepo).toBe('acme/tool')

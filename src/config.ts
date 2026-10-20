@@ -11,10 +11,13 @@ export type Config = {
   drainSeconds: number; socketReconcileTicks: number;
   /** Weekly feedback review, local time (system TZ): weekday 0 = Sunday … 6 = Saturday. */
   feedbackReviewCron: ReviewCron;
+  /** Morning briefing, local time (system TZ), on these weekdays (0 = Sunday … 6 = Saturday). */
+  briefing: BriefingCron;
   /** References enrichment: bare «PR #123» numbers resolve to defaultRepo (owner/repo); Jira keys link to jira.site. */
   github: { defaultRepo: string }; jira: { site: string };
 }
 export type ReviewCron = { weekday: number; hour: number; minute: number }
+export type BriefingCron = { hour: number; minute: number; weekdays: number[] }
 
 function expandHome(p: string): string {
   if (p === '~') return homedir()
@@ -43,6 +46,12 @@ const ConfigSchema = z.object({
     hour: z.number().int().min(0).max(23),
     minute: z.number().int().min(0).max(59),
   }).default({ weekday: 1, hour: 9, minute: 30 }),
+  briefing: z.object({
+    hour: z.number().int().min(0).max(23).default(9),
+    minute: z.number().int().min(0).max(59).default(30),
+    weekdays: z.array(z.number().int().min(0).max(6)).min(1)
+      .refine((d) => new Set(d).size === d.length, 'weekdays must not repeat').default([1, 2, 3, 4, 5]),
+  }).prefault({}),
   github: z.object({ defaultRepo: z.string().regex(/^[\w.-]+\/[\w.-]+$/, 'must be owner/repo') }).default({ defaultRepo: 'scentbird/scentbird' }),
   jira: z.object({ site: z.string().regex(/^[\w.-]+$/, 'must be a host name') }).default({ site: 'scentbird.atlassian.net' }),
 })

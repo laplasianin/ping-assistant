@@ -71,7 +71,7 @@ export function ingest(state: State, m: SlackMsg, source: ItemSource, now: numbe
     state.msgIndex[`${m.channel}:${m.ts}`] = OWN_MSG
     const closed = answeredBy(state, m, source)
     if (closed.length === 0) return { kind: 'dropped', reason: 'own' }
-    for (const i of closed) i.status = 'answered_manually'
+    for (const i of closed) { i.status = 'answered_manually'; i.closedAt = now }
     return { kind: 'answered_manually', itemIds: closed.map((i) => i.id) }
   }
   if (m.user === '') { state.msgIndex[`${m.channel}:${m.ts}`] = OWN_MSG; return { kind: 'dropped', reason: 'bot' } }

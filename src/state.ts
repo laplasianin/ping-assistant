@@ -19,6 +19,7 @@ export type Item = {
   // triageAlerted: the «без разбора» reminder was sent (once per triage).
   telegram: { messageId?: number; proposalMessageId?: number; warningMessageId?: number; warningText?: string; text?: string; chosen?: number; triageAlerted?: boolean };
   ignoreReason?: string; sentTs?: string;
+  closedAt?: number;                         // when it became ignored, sent, skipped or answered_manually (briefing)
   sentChoice?: number | 'custom';            // what was sent: variant N or Ilya's own text (kept for feedback)
   references?: References;                   // Jira/PR lookups at delivery, reused by revise and fresh follow-ups
 }
@@ -44,6 +45,7 @@ export type State = {
   channels: Record<string, string>;           // channelId → name (кэш)
   feedback: FeedbackEntry[];                  // oldest first
   lastFeedbackReviewAt?: number;              // when the weekly feedback review last ran
+  lastBriefingAt?: number;                    // when the scheduled morning briefing last ran
   threads: Record<string, ThreadMemory>;      // threadKey(item) → last stored agreements
 }
 
