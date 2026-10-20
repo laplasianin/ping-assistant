@@ -154,7 +154,7 @@ export class TelegramBot {
       }
       const cmd = parseCallback(q.data)
       try {
-        await this.api.answerCallbackQuery(q.id, cmd?.kind === 'bad' ? { text: '👎 записал' } : undefined)
+        await this.api.answerCallbackQuery(q.id) // neutral: the handler's reply carries the outcome
       } catch (err) {
         this.log(`answerCallbackQuery failed: ${err instanceof Error ? err.name : 'unknown'}`) // stale query must not drop the command
       }

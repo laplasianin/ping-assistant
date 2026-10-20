@@ -1360,3 +1360,80 @@ test('a review moment missed while asleep fires on the first tick after it', asy
   expect(e.notes.filter((n) => n.meta.kind === 'feedback-review')).toHaveLength(1)
   expect(state.lastFeedbackReviewAt).toBe(wake)
 })
+
+test('a second 👎 on the same item within 24 h refreshes the entry instead of adding one', async () => {
+  const e = await setup()
+  await matureThreadItem(e)
+  const sent = await propose(e, ['a', 'b'])
+  await e.callback('pa:bad:1', sent.id)
+  e.advance(3_600_000)
+  await e.callback('pa:bad:1', sent.id)
+  expect(e.state.feedback).toHaveLength(1)
+  expect(e.state.feedback[0]!.at).toBe(T0 + 91_000 + 3_600_000)
+  expect(e.api.last().text).toBe(BAD_REPLY)
+  e.advance(25 * 3_600_000)
+  await e.callback('pa:bad:1', sent.id)
+  expect(e.state.feedback).toHaveLength(2)
+})
+
+test('list_feedback is bounded: since_days clamped to 1..90, latest 50 entries, long variants and notes cut', async () => {
+  const e = await setup()
+  const DAY = 86_400_000
+  for (let i = 0; i < 60; i++) e.state.feedback.push({ itemId: `n${i}`, at: T0 - 60_000 + i, source: 'im', channel: 'D1' })
+  e.state.feedback.unshift({ itemId: 'ancient', at: T0 - 100 * DAY, source: 'im', channel: 'D1' })
+  e.state.feedback.unshift({ itemId: 'old89', at: T0 - 89 * DAY, source: 'im', channel: 'D1' })
+  e.state.feedback.push({ itemId: 'long', at: T0, note: 'н'.repeat(400), variants: ['в'.repeat(200), 'short'], source: 'im', channel: 'D1' })
+  const call = async (args: Record<string, unknown>) => {
+    const res = await e.client.callTool({ name: 'list_feedback', arguments: args })
+    return (res.content as { text: string }[])[0]!.text
+  }
+  const out = await call({ since_days: 1000 })
+  const heads = out.split('\n').filter((l) => l.startsWith('#'))
+  expect(heads).toHaveLength(50)
+  expect(heads[0]).toStartWith('#n11 ')
+  expect(heads.at(-1)).toStartWith('#long ')
+  expect(out).toContain(`  note: ${'н'.repeat(300)}…\n`)
+  expect(out).toContain(`  variants: 1) ${'в'.repeat(160)}… | 2) short`)
+  e.state.feedback = e.state.feedback.filter((x) => x.itemId === 'ancient' || x.itemId === 'old89')
+  expect(await call({ since_days: 1000 })).toStartWith('#old89 ') // 90 days at most
+  expect(await call({ since_days: 1000 })).not.toContain('ancient')
+  e.state.feedback.push({ itemId: 'today', at: T0 - 3_600_000, source: 'im', channel: 'D1' }, { itemId: 'twodays', at: T0 - 2 * DAY, source: 'im', channel: 'D1' })
+  expect(await call({ since_days: 0.01 })).toBe('#today 2026-10-19 #D1') // at least 1 day
+})
+
+test('a failing review notify is retried at most once a minute and logged once per failure streak', async () => {
+  const state = emptyState()
+  state.lastFeedbackReviewAt = local(2026, 9, 12, 9, 31)
+  state.feedback.push({ itemId: '1', at: T0 - 86_400_000, source: 'im', channel: 'личка' })
+  const e = await setup({}, state)
+  e.advance(local(2026, 9, 19, 12, 0) - T0)
+  let attempts = 0
+  let fail = true
+  const real = Channel.prototype.notify
+  const spy = spyOn(Channel.prototype, 'notify').mockImplementation(async function (this: Channel, c: string, m: Record<string, string>) {
+    if (m.kind !== 'feedback-review') return real.call(this, c, m)
+    attempts++
+    if (fail) throw new Error('session gone')
+  })
+  const failures = () => stderr.mock.calls.filter((c: unknown[]) => String(c[0]).includes('feedback-review failed')).length
+  try {
+    await e.orch.tick()
+    expect(attempts).toBe(1)
+    for (let i = 0; i < 11; i++) { e.advance(5_000); await e.orch.tick() } // 55 s later
+    expect(attempts).toBe(1)
+    e.advance(5_000)
+    await e.orch.tick() // 60 s after the failure
+    expect(attempts).toBe(2)
+    expect(failures()).toBe(1)
+    fail = false
+    e.advance(60_000)
+    await e.orch.tick()
+    expect(attempts).toBe(3)
+    expect(state.lastFeedbackReviewAt).toBe(local(2026, 9, 19, 12, 2))
+    e.advance(60_000)
+    await e.orch.tick()
+    expect(attempts).toBe(3)
+  } finally {
+    spy.mockRestore()
+  }
+})

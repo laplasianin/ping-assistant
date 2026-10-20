@@ -34,6 +34,12 @@ const isDm = (item: Item): boolean => item.source === 'im' || item.source === 'm
 /** The feedback review covers this much history. */
 const REVIEW_WINDOW_MS = 7 * DAY_MS
 const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim()
+const cut = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max)}…` : text)
+/** list_feedback bounds: the session's context is not a dump. */
+const FEEDBACK_LIST_MAX = 50
+const FEEDBACK_DAYS_MAX = 90
+/** A failed feedback-review notify is retried no sooner than this. */
+const REVIEW_RETRY_MS = 60_000
 
 /** The latest scheduled review moment at or before now, in local time (DST-safe: built from local fields). */
 export function lastReviewMoment(now: number, cron: ReviewCron): number {
@@ -54,6 +60,8 @@ export class Orchestrator {
   /** The socket gave up for good: ticks run every pollSeconds, as without Socket Mode. */
   private pollingOnly = false
   private lastPrune: number | undefined
+  /** Feedback review notify failed: no new attempt before this; set only during a failure streak. */
+  private reviewRetryAt: number | undefined
 
   constructor(private readonly d: OrchestratorDeps) {
     this.now = d.now ?? Date.now
@@ -199,14 +207,15 @@ export class Orchestrator {
         return items.map((i) => `#${i.id} #${this.channelName(i)} ${this.authorName(i)} — ${i.ignoreReason ?? ''}`).join('\n')
       },
       listFeedback: async (sinceDays) => {
-        const since = this.now() - sinceDays * DAY_MS
-        const entries = this.d.state.feedback.filter((f) => f.at >= since)
+        const days = Math.min(FEEDBACK_DAYS_MAX, Math.max(1, sinceDays))
+        const since = this.now() - days * DAY_MS
+        const entries = this.d.state.feedback.filter((f) => f.at >= since).slice(-FEEDBACK_LIST_MAX)
         if (!entries.length) return 'фидбека нет'
         return entries.map((f) => {
           const lines = [`#${f.itemId} ${new Date(f.at).toISOString().slice(0, 10)} #${f.channel}${f.chosen !== undefined ? ` chosen=${f.chosen}` : ''}`]
-          if (f.note) lines.push(`  note: ${oneLine(f.note)}`)
+          if (f.note) lines.push(`  note: ${cut(oneLine(f.note), 300)}`)
           if (f.analysis) lines.push(`  analysis: ${oneLine(f.analysis).slice(0, 120)}`)
-          if (f.variants?.length) lines.push(`  variants: ${f.variants.map((v, i) => `${i + 1}) ${oneLine(v)}`).join(' | ')}`)
+          if (f.variants?.length) lines.push(`  variants: ${f.variants.map((v, i) => `${i + 1}) ${cut(oneLine(v), 160)}`).join(' | ')}`)
           return lines.join('\n')
         }).join('\n')
       },
@@ -339,7 +348,9 @@ export class Orchestrator {
       return
     }
     if (!item) { await tg.send(`Не знаю айтем #${escapeHtml(c.itemId)}`); return }
-    this.addFeedback(item, now)
+    const recent = [...state.feedback].reverse().find((f) => f.itemId === c.itemId && now - f.at < DAY_MS)
+    if (recent) recent.at = now // a repeated 👎 is the same complaint
+    else this.addFeedback(item, now)
     const id = await tg.send('👎 записал. Что не так? Ответь цитатой: «фидбек: …»', undefined, messageId)
     tg.registerMessage(id, item.id) // a quote-reply to it resolves to the item
   }
@@ -487,12 +498,15 @@ export class Orchestrator {
     const since = now - REVIEW_WINDOW_MS
     const entries = state.feedback.filter((f) => f.at >= since).map((f) => ({ ...f, at: new Date(f.at).toISOString() }))
     if (entries.length) {
+      if (this.reviewRetryAt !== undefined && now < this.reviewRetryAt) return false
       try {
         await this.d.channel.notify(JSON.stringify({ since: new Date(since).toISOString(), entries }), { kind: 'feedback-review' })
       } catch (err) {
-        log(`notify feedback-review failed: ${errName(err)}`) // retried on the next tick
+        if (this.reviewRetryAt === undefined) log(`notify feedback-review failed: ${errName(err)}`) // once per streak
+        this.reviewRetryAt = now + REVIEW_RETRY_MS
         return false
       }
+      this.reviewRetryAt = undefined
       log('feedback review sent')
     }
     state.lastFeedbackReviewAt = now

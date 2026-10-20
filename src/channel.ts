@@ -94,7 +94,7 @@ const TOOLS = [
   },
   {
     name: 'list_feedback',
-    description: "Ilya's feedback on past items (👎 button and «фидбек: …» notes) from the last since_days days (default 7): item id, date, channel, note, chosen variant, start of the analysis, variants.",
+    description: "Ilya's feedback on past items (👎 button and «фидбек: …» notes) from the last since_days days (default 7, clamped to 1..90; at most the latest 50 entries, long notes and variants cut): item id, date, channel, note, chosen variant, start of the analysis, variants.",
     inputSchema: { type: 'object', properties: { since_days: { type: 'number', description: 'Default 7.' } } },
   },
   {
