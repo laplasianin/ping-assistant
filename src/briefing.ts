@@ -14,6 +14,8 @@ const FIRST_LINE_MAX = 80
 export type Briefing = {
   since: string
   ignored: { id: string; channel: string; author: string; reason: string; at: string }[]
+  /** All items ignored since `since`; `ignored` holds only the latest BRIEFING_IGNORED_MAX of them. */
+  ignored_total: number
   awaiting: { id: string; channel: string; author: string; age_minutes: number; first_line: string }[]
   stuck: { id: string; status: string; age_minutes: number }[]
   answered: { id: string; channel: string; chosen: number | 'custom' | null; sent_at: string }[]
@@ -54,10 +56,12 @@ export function briefingPayload(state: State, cfg: Config, now: number, lastBrie
   const age = (i: Item): number => Math.floor((now - i.createdAt) / MIN_MS)
   const closedSince = (status: Item['status']): Item[] =>
     items.filter((i) => i.status === status && closedAt(i) >= since).sort((a, b) => closedAt(b) - closedAt(a))
+  const ignored = closedSince('ignored')
   return {
     since: iso(since),
-    ignored: closedSince('ignored').slice(0, BRIEFING_IGNORED_MAX)
+    ignored: ignored.slice(0, BRIEFING_IGNORED_MAX)
       .map((i) => ({ id: i.id, channel: channel(i), author: author(i), reason: i.ignoreReason ?? '', at: iso(closedAt(i)) })),
+    ignored_total: ignored.length,
     awaiting: items.filter((i) => i.status === 'awaiting').sort(newestFirst).map((i) => ({
       id: i.id, channel: channel(i), author: author(i), age_minutes: age(i),
       first_line: (i.messages[0]?.text ?? '').split('\n')[0]!.trim().slice(0, FIRST_LINE_MAX),

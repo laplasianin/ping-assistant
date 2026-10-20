@@ -120,7 +120,7 @@
 
 **`feedback-review`** — раз в неделю (понедельник утром): `{ "since": "…", "entries": [{ "itemId": "14", "at": "…", "note": "…", "analysis": "…", "variants": [ … ], "chosen": 2, "source": "im", "channel": "…" }] }` — фидбек Ильи за 7 дней. См. «Обработка `feedback-review`».
 
-**`briefing`** — утренний брифинг (по будням утром, или сразу, если Илья написал «брифинг»): `{ "since": "…", "ignored": [{ "id", "channel", "author", "reason", "at" }], "awaiting": [{ "id", "channel", "author", "age_minutes", "first_line" }], "stuck": [{ "id", "status", "age_minutes" }], "answered": [{ "id", "channel", "chosen", "sent_at" }], "manual": [{ "id", "channel" }], "feedback_count": 3, "today": "2026-10-20" }`. См. «Обработка `briefing`».
+**`briefing`** — утренний брифинг (по будням утром, или сразу, если Илья написал «брифинг»): `{ "since": "…", "ignored": [{ "id", "channel", "author", "reason", "at" }], "ignored_total": 25, "awaiting": [{ "id", "channel", "author", "age_minutes", "first_line" }], "stuck": [{ "id", "status", "age_minutes" }], "answered": [{ "id", "channel", "chosen", "sent_at" }], "manual": [{ "id", "channel" }], "feedback_count": 3, "today": "2026-10-20" }`. См. «Обработка `briefing`».
 
 **`selftest`** — служебная проверка канала: ответь в транскрипте ровно `SELFTEST-OK` и не вызывай никаких инструментов.
 
@@ -338,13 +338,12 @@ README). Тяжёлый ресёрч и написание вариантов д
 каждый с заголовком отдельной строкой:
 
 - «Ждут тебя» — `awaiting`, самые новые сверху: `#14 Anna (#channel, 2 ч): <first_line>`.
-- «Отправлено вчера» — `answered` (`#14 #channel, вариант 2` / `свой текст`) и `manual`
+- «Отправлено с прошлого брифинга» — `answered` (`#14 #channel, вариант 2` / `свой текст`) и `manual`
   (`#15 #channel — ответил сам`).
-- «Проигнорировано» — сколько всего, и 3–5 самых показательных с причиной
+- «Проигнорировано» — сколько всего (`ignored_total`; в `ignored` — не больше 20 последних), и 3–5 самых показательных с причиной
   (`#16 Boris, #channel — FYI без вопроса`): выбирай те, где триаж мог ошибиться (вопрос,
   упоминание Ильи, личка, руководитель), чтобы Илья мог поймать неверный `ignore`.
 - «Застряло» — `stuck`: `#17 triage, 25 мин`.
-- «Треды с новым» — только если в JSON есть `threads_with_news`.
 
 Затем «Сегодня в календаре»: вызови `mcp__claude_ai_Google_Calendar__list_events` за сегодня
 (`today`, местное время) и перечисли встречи по времени: `10:00 Mexico sync — <одна строка

@@ -80,6 +80,7 @@ test('payload sorts items into ignored, awaiting, stuck, answered and manual by 
     { id: '1', channel: 'pathfinders', author: 'Boris', reason: 'FYI', at: new Date(NOW - 2 * HOUR).toISOString() },
     { id: '3', channel: 'D1', author: 'Anna', reason: 'legacy', at: new Date(NOW - 3 * HOUR + MIN).toISOString() },
   ])
+  expect(p.ignored_total).toBe(2)
   expect(p.awaiting).toEqual([
     { id: '4', channel: 'D1', author: 'Anna', age_minutes: 30, first_line: `Первая строка ${'x'.repeat(66)}` },
     { id: '5', channel: 'D1', author: 'Old Name', age_minutes: 3 * 24 * 60, first_line: 'msg 5' },
@@ -94,17 +95,18 @@ test('payload sorts items into ignored, awaiting, stuck, answered and manual by 
   expect(p).not.toHaveProperty('threads_with_news') // not derivable from state: omitted
 })
 
-test('ignored holds at most the 20 most recent', () => {
+test('ignored holds at most the 20 most recent; ignored_total counts all', () => {
   const items = Array.from({ length: 25 }, (_, k) => item({ status: 'ignored', ignoreReason: `r${k}`, closedAt: NOW - (k + 1) * MIN }))
   const p = briefingPayload(stateWith(...items), cfg, NOW, undefined)
   expect(p.ignored).toHaveLength(20)
   expect(p.ignored[0]!.reason).toBe('r0')
   expect(p.ignored[19]!.reason).toBe('r19')
+  expect(p.ignored_total).toBe(25)
 })
 
 test('an empty state gives empty lists', () => {
   expect(briefingPayload(stateWith(), cfg, NOW, NOW - HOUR)).toEqual({
-    since: new Date(NOW - HOUR).toISOString(), ignored: [], awaiting: [], stuck: [], answered: [], manual: [],
+    since: new Date(NOW - HOUR).toISOString(), ignored: [], ignored_total: 0, awaiting: [], stuck: [], answered: [], manual: [],
     feedback_count: 0, today: '2026-10-20',
   })
 })

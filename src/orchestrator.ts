@@ -567,7 +567,7 @@ export class Orchestrator {
     return true
   }
 
-  /** The briefing since the last scheduled one (at most 24 h back); an on-demand one leaves the schedule alone. */
+  /** The briefing since the last scheduled one (at most 7 days back; the last 24 h before the first one); an on-demand one leaves the schedule alone. */
   private async sendBriefing(now: number): Promise<void> {
     const { state, cfg } = this.d
     await this.d.channel.notify(JSON.stringify(briefingPayload(state, cfg, now, state.lastBriefingAt)), { kind: 'briefing' })
