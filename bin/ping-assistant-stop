@@ -1,0 +1,21 @@
+#!/bin/sh
+# Turn Ping Assistant fully off: unload the launchd agents (otherwise the session would be
+# recreated within 5 minutes and the watchdog would alert), then end the tmux session.
+#   bin/ping-assistant-stop
+# Turn it back on with bin/ping-assistant-session (or the "Ping Assistant.command" icon).
+TMUX_BIN=/opt/homebrew/bin/tmux
+SESSION=ping-assistant
+UID_=$(id -u)
+
+for agent in com.ping-assistant.session com.ping-assistant.watchdog; do
+  if launchctl print "gui/$UID_/$agent" >/dev/null 2>&1; then
+    launchctl bootout "gui/$UID_/$agent" && echo "autostart off: $agent"
+  fi
+done
+
+if "$TMUX_BIN" has-session -t "=$SESSION" 2>/dev/null; then
+  "$TMUX_BIN" kill-session -t "=$SESSION" && echo "session stopped"
+else
+  echo "session was not running"
+fi
+echo "Ping Assistant is off. Start again with the Ping Assistant icon or bin/ping-assistant-session."
