@@ -6,6 +6,7 @@ import type { Config, ReviewCron } from './config'
 import { escapeHtml, outcome, renderItem, renderProposal, renderThreadChanged, renderUpdate, slackify, type Keyboard } from './format'
 import { ItemMessages, itemJson, lastPart, msgJson, referencesJson, withoutHint } from './item-messages'
 import { ingest, mature, prune } from './items'
+import { threadJson } from './thread-stats'
 import { detectReferences, ReferenceFetcher, type References } from './references'
 import type { RawMsg, SlackClient } from './slack/client'
 import { applyCursors, cmpTs, type Collector } from './slack/collector'
@@ -539,7 +540,7 @@ export class Orchestrator {
         // The reminder stands in for the item message until propose replaces it: skip edits its outcome there.
         item.telegram = { ...item.telegram, messageId: id, text, triageAlerted: true }
         tg.registerMessage(id, item.id)
-        await this.d.channel.notify(JSON.stringify(itemJson(item)), { kind: 'item', item_id: item.id })
+        await this.d.channel.notify(JSON.stringify(this.itemJson(item)), { kind: 'item', item_id: item.id })
       })
     }
     return acted
@@ -550,7 +551,7 @@ export class Orchestrator {
     item.context = await this.context(item)
     await this.enrich(item)
     try {
-      await this.d.channel.notify(JSON.stringify(itemJson(item)), { kind: 'item', item_id: item.id })
+      await this.d.channel.notify(JSON.stringify(this.itemJson(item)), { kind: 'item', item_id: item.id })
     } catch (err) {
       item.status = 'settling' // matures again on the next tick
       log(`notify item failed: ${errName(err)}`)
@@ -590,6 +591,11 @@ export class Orchestrator {
       log(`context failed: ${errName(err)}`)
       return []
     }
+  }
+
+  /** The item as the session sees it, with its conversation stats. */
+  private itemJson(item: Item) {
+    return itemJson(item, threadJson(item, this.d.state, this.d.cfg.userId))
   }
 
   private async safely(what: string, fn: () => Promise<void>): Promise<void> {

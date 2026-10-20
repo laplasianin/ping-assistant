@@ -2,6 +2,7 @@
 // Every edit is best-effort: a failed edit is logged (kind only) and never blocks a state change.
 import { chunk, feedbackKeyboard, outcome, type Keyboard } from './format'
 import type { References } from './references'
+import type { ThreadJson } from './thread-stats'
 import type { Item, SlackMsg } from './state'
 import type { TelegramBot } from './telegram/bot'
 
@@ -25,13 +26,15 @@ export const msgJson = (m: SlackMsg) => ({ ts: m.ts, user: m.user, userName: m.u
 /** What the session sees of the item's references (without the cache timestamp). */
 export const referencesJson = (r: References) => ({ jira: r.jira, prs: r.prs, unresolved: r.unresolved })
 
-export function itemJson(item: Item) {
+/** thread: conversation stats (thread-stats.ts), omitted for a short top-level conversation. */
+export function itemJson(item: Item, thread?: ThreadJson) {
   return {
     id: item.id, source: item.source, channel: item.channel, channelName: item.channelName, threadTs: item.threadTs,
     author: item.author, authorName: item.authorName,
     messages: item.messages.map(msgJson), context: item.context.map(msgJson),
     permalink: item.messages[0]?.permalink, files: item.messages.flatMap((m) => m.files ?? []),
     ...(item.references ? { references: referencesJson(item.references) } : {}),
+    ...(thread ? { thread } : {}),
   }
 }
 

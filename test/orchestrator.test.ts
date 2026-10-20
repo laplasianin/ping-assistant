@@ -611,6 +611,7 @@ test('reply in a thread ping-assistant answered in creates item 1.1 with full th
   const body = JSON.parse(e.notes[1]!.content)
   expect(body).toMatchObject({ id: '1.1', source: 'followup', threadTs: root, messages: [{ ts: reply, text: 'Спасибо, а когда?' }] })
   expect(body.context.map((m: SlackMsg) => [m.ts, m.text])).toEqual([[root, 'root'], [ts(-30), 'Почему падает сборка?'], [mine, 'Починю сегодня']])
+  expect(body.thread).toMatchObject({ messages: 4, my_messages: 1, prior_items: [{ id: '1', status: 'sent', sentTs: e.state.items['1']!.sentTs, chosen: 1 }] })
 })
 
 test('a stale choose button from a superseded item message posts nothing', async () => {

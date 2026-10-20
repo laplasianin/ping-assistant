@@ -72,6 +72,11 @@
     "jira": [{ "key": "PF-4282", "url": "https://scentbird.atlassian.net/browse/PF-4282", "summary": "…", "status": "In QA", "assignee": "… | null", "updated": "…", "lastComment": { "author": "…", "text": "первые 300 символов" } }],
     "prs": [{ "url": "https://github.com/…/pull/15110", "repo": "scentbird/scentbird", "number": 15110, "title": "…", "state": "open | merged | closed | draft", "author": "login", "updated": "…", "branch": "…", "checks": { "success": 5, "failure": 0, "pending": 1 } }],
     "unresolved": ["PF-4300", "https://github.com/…/pull/7"]
+  },
+  "thread": {
+    "messages": 14, "participants": [{ "id": "U…", "name": "Max Darski", "count": 6 }],
+    "my_messages": 3, "my_last_at": "…", "first_at": "…", "last_at": "…", "days_span": 2.5,
+    "prior_items": [{ "id": "14", "status": "sent", "sentTs": "…", "chosen": 2 }]
   }
 }
 ```
@@ -79,6 +84,11 @@
 `messages` — то, на что нужен ответ; `context` — только для понимания. Если у файла есть
 `path`, прочитай его через `Read` (скриншоты часто содержат сам вопрос). `followup` — новая
 реплика в наблюдаемом треде (id вида `14.2`).
+
+`thread` есть, если айтем в треде или в `context` ≥ 6 сообщений: статистика разговора
+(`context` + `messages`; `my_*` — сообщения Ильи, `days_span` — дни между первым и последним
+сообщением) и `prior_items` — более ранние айтемы этой цепочки follow-up или этого разговора
+(`chosen` — что отправлено: номер варианта или `custom`). Для короткой лички `thread` нет.
 
 `references` есть, только если в `messages`/`context` нашлись ключи Jira или PR (ссылки
 `github.com/…/pull/N` и «PR #N»). Сервер уже сходил за ними перед доставкой (не дольше ~6 с):
