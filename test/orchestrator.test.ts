@@ -589,6 +589,9 @@ test('reply in a thread ping-assistant answered in creates item 1.1 with full th
   await e.flush()
   expect(e.notes.map((n) => n.meta.item_id)).toEqual(['1'])
   await propose(e, ['Починю сегодня'])
+  const saved = await e.client.callTool({ name: 'remember_thread', arguments: { item_id: '1', agreements: 'Договорённости: Илья чинит сегодня' } })
+  expect(saved.isError).toBeFalsy()
+  expect(e.state.threads[`C1:${root}`]).toEqual({ agreements: 'Договорённости: Илья чинит сегодня', updatedAt: T0 + 91_000, itemId: '1' })
   await e.callback('pa:choose:1:1', e.api.last().id)
   expect(e.slack.posted).toHaveLength(1)
   expect(e.state.items['1']!.status).toBe('sent')
@@ -612,6 +615,7 @@ test('reply in a thread ping-assistant answered in creates item 1.1 with full th
   expect(body).toMatchObject({ id: '1.1', source: 'followup', threadTs: root, messages: [{ ts: reply, text: 'Спасибо, а когда?' }] })
   expect(body.context.map((m: SlackMsg) => [m.ts, m.text])).toEqual([[root, 'root'], [ts(-30), 'Почему падает сборка?'], [mine, 'Починю сегодня']])
   expect(body.thread).toMatchObject({ messages: 4, my_messages: 1, prior_items: [{ id: '1', status: 'sent', sentTs: e.state.items['1']!.sentTs, chosen: 1 }] })
+  expect(body.thread.agreements).toEqual({ text: 'Договорённости: Илья чинит сегодня', updated_at: new Date(T0 + 91_000).toISOString(), item_id: '1' })
 })
 
 test('a stale choose button from a superseded item message posts nothing', async () => {
@@ -1537,4 +1541,11 @@ test('a follow-up reuses fresh references from its thread and refetches stale on
     expect(f.ghCalls.length > 0).toBe(refetched)
     e.orch.stop()
   }
+})
+
+test('remember_thread on an unknown item is an error and stores nothing', async () => {
+  const e = await setup()
+  const res = await e.client.callTool({ name: 'remember_thread', arguments: { item_id: '404', agreements: 'x' } })
+  expect(res.isError).toBe(true)
+  expect(e.state.threads).toEqual({})
 })

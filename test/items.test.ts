@@ -315,3 +315,14 @@ test('prune keeps index entries above the search/dmsearch floors (minus the inde
   expect(s.items['1']).toBeUndefined()
   expect(Object.keys(s.msgIndex).sort()).toEqual([`C9:${sec(hit)}`, `D1:${sec(hit - 900_000)}`])
 })
+
+test('prune drops thread agreements older than followUpDays × 4', () => {
+  const DAY = 86_400_000
+  const now = T0 + 60 * DAY
+  const s = emptyState()
+  s.threads['C1:100.1'] = { agreements: 'old', updatedAt: now - 29 * DAY, itemId: '1' }
+  s.threads['C1:200.1'] = { agreements: 'fresh', updatedAt: now - 27 * DAY, itemId: '2' }
+  expect(prune(s, now, cfg)).toBe(true)
+  expect(Object.keys(s.threads)).toEqual(['C1:200.1'])
+  expect(prune(s, now, cfg)).toBe(false)
+})

@@ -28,6 +28,8 @@ export type FeedbackEntry = {
   chosen?: number | 'custom'; source: ItemSource; channel: string;
 }
 export const FEEDBACK_MAX = 500
+/** The session's «Договорённости / Открыто» summary of a conversation (remember_thread), pruned after followUpDays × 4. */
+export type ThreadMemory = { agreements: string; updatedAt: number; itemId: string }
 export type State = {
   cursors: Record<string, string>;            // ключ: `hist:${channel}` | `thr:${channel}:${threadTs}` | 'search' | 'dmsearch' | 'lastTick'
   items: Record<string, Item>; nextSeq: number;
@@ -42,10 +44,11 @@ export type State = {
   channels: Record<string, string>;           // channelId → name (кэш)
   feedback: FeedbackEntry[];                  // oldest first
   lastFeedbackReviewAt?: number;              // when the weekly feedback review last ran
+  threads: Record<string, ThreadMemory>;      // threadKey(item) → last stored agreements
 }
 
 export function emptyState(): State {
-  return { cursors: {}, items: {}, nextSeq: 1, msgIndex: {}, watchedThreads: {}, users: {}, channels: {}, feedback: [] }
+  return { cursors: {}, items: {}, nextSeq: 1, msgIndex: {}, watchedThreads: {}, users: {}, channels: {}, feedback: [], threads: {} }
 }
 
 export class StateStore {

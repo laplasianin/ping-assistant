@@ -83,3 +83,13 @@ test('threadKey: a top-level channel item is keyed by the thread under its first
   expect(threadKey(item({ threadTs: undefined, messages: [m(T + 7, 'U2', undefined, { threadTs: undefined })] }))).toBe(`C1:${T + 7}.000100`)
   expect(threadKey(item({ source: 'im', channel: 'D1', threadTs: undefined }))).toBe('D1:')
 })
+
+test('stored agreements of the conversation are included, even for a short DM', () => {
+  const dm = item({ source: 'im', channel: 'D1', threadTs: undefined, messages: [m(T, 'U2', 'Bob', { channel: 'D1', threadTs: undefined })] })
+  const s = stateWith(dm)
+  s.threads['D1:'] = { agreements: 'Открыто: срок', updatedAt: 1_000, itemId: '9' }
+  expect(threadJson(dm, s, 'ME')).toMatchObject({ messages: 1, agreements: { text: 'Открыто: срок', updated_at: new Date(1_000).toISOString(), item_id: '9' } })
+  const th = item()
+  th.messages = [m(T, 'U2')]
+  expect('agreements' in threadJson(th, stateWith(th), 'ME')!).toBe(false)
+})

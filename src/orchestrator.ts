@@ -6,7 +6,7 @@ import type { Config, ReviewCron } from './config'
 import { escapeHtml, outcome, renderItem, renderProposal, renderThreadChanged, renderUpdate, slackify, type Keyboard } from './format'
 import { ItemMessages, itemJson, lastPart, msgJson, referencesJson, withoutHint } from './item-messages'
 import { ingest, mature, prune } from './items'
-import { threadJson } from './thread-stats'
+import { threadJson, threadKey } from './thread-stats'
 import { detectReferences, ReferenceFetcher, type References } from './references'
 import type { RawMsg, SlackClient } from './slack/client'
 import { applyCursors, cmpTs, type Collector } from './slack/collector'
@@ -226,6 +226,13 @@ export class Orchestrator {
           if (f.variants?.length) lines.push(`  variants: ${f.variants.map((v, i) => `${i + 1}) ${cut(oneLine(v), 160)}`).join(' | ')}`)
           return lines.join('\n')
         }).join('\n')
+      },
+      rememberThread: async (id, agreements) => {
+        const item = this.d.state.items[id]
+        if (!item) throw new Error(`unknown item #${id}`)
+        // Any status: the summary is written after propose and may be refreshed after the item is sent.
+        this.d.state.threads[threadKey(item)] = { agreements, updatedAt: this.now(), itemId: item.id }
+        return done(`#${id}: agreements saved`)
       },
       say: async (text) => {
         await tg.send(text, undefined, undefined, { plain: true }) // free text from the session: a stray < must not break it

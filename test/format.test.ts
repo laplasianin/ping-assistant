@@ -32,6 +32,12 @@ describe('renderItem', () => {
     expect(text).not.toContain('**')
   })
 
+  test('agreements labels are bold too', () => {
+    const analysis = 'Договорённости:\n• Bob чинит до пт\nОткрыто:\n• кто тестирует?'
+    const { text } = renderItem(item({ analysis }), {}, {}, NOW)
+    expect(text).toContain('<b>Договорённости:</b>\n• Bob чинит до пт\n<b>Открыто:</b>\n• кто тестирует?')
+  })
+
   test('target layout: bold header, expandable quote, link, bold labels, numbered variants, italic hint', () => {
     const analysis = 'Тип: вопрос\nВопросы (2): статус?\nРазбор: <нужен> ответ\nСмысл: просит статус'
     const { text, keyboard } = renderItem(item({ analysis }), { U2: 'Bob' }, {}, NOW)

@@ -9,6 +9,7 @@
       "mcp__ping-assistant__list_ignored",
       "mcp__ping-assistant__list_feedback",
       "mcp__ping-assistant__say",
+      "mcp__ping-assistant__remember_thread",
       "Read",
       "Grep",
       "Glob",

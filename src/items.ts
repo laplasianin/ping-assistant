@@ -114,6 +114,7 @@ const DAY_MS = 86_400_000
  * Open items (settling, triage, awaiting) are never touched. Returns whether anything was removed.
  * An entry at or above the search floors (search, dmsearch) minus SEARCH_LAG_S always stays: those searches
  * return such hits again every tick, and only msgIndex keeps them from becoming duplicate items.
+ * Thread agreements (state.threads) last longer: they go once not updated for followUpDays × 4.
  */
 export function prune(state: State, now: number, cfg: Config): boolean {
   const cutoff = now - cfg.followUpDays * DAY_MS
@@ -133,6 +134,10 @@ export function prune(state: State, now: number, cfg: Config): boolean {
     const at = Number(key.slice(key.lastIndexOf(':') + 1)) * 1000
     if (at >= keepAbove) continue // a pruned item's entry stays too: it still deduplicates the re-read hit
     if (pruned.has(value) || (at < cutoff && (value === OWN_MSG || !state.items[value]))) { delete state.msgIndex[key]; removed++ }
+  }
+  const threadCutoff = now - cfg.followUpDays * 4 * DAY_MS
+  for (const [key, t] of Object.entries(state.threads)) {
+    if (t.updatedAt < threadCutoff) { delete state.threads[key]; removed++ }
   }
   return pruned.size > 0 || removed > 0
 }

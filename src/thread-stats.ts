@@ -18,6 +18,8 @@ export type ThreadJson = {
   last_at: string
   days_span: number
   prior_items: PriorItem[]
+  /** The session's last remember_thread summary of this conversation. */
+  agreements?: { text: string; updated_at: string; item_id: string }
 }
 
 const isDm = (i: Item): boolean => i.source === 'im' || i.source === 'mpim'
@@ -50,9 +52,13 @@ function priorItems(item: Item, state: State): PriorItem[] {
     }))
 }
 
-/** Thread stats for a thread item or one with a long context; undefined for a short top-level conversation. */
+/**
+ * Thread stats for a thread item, one with a long context, or one whose conversation has stored agreements;
+ * undefined for a short top-level conversation without them.
+ */
 export function threadJson(item: Item, state: State, userId: string): ThreadJson | undefined {
-  if (item.threadTs === undefined && item.context.length < THREAD_MIN_CONTEXT) return undefined
+  const memory = state.threads[threadKey(item)]
+  if (item.threadTs === undefined && item.context.length < THREAD_MIN_CONTEXT && !memory) return undefined
   const byTs = new Map<string, SlackMsg>()
   for (const m of [...item.context, ...item.messages]) byTs.set(m.ts, m)
   const all = [...byTs.values()].sort((a, b) => tsMs(a.ts) - tsMs(b.ts))
@@ -76,5 +82,6 @@ export function threadJson(item: Item, state: State, userId: string): ThreadJson
     last_at: iso(last),
     days_span: Math.round(((last - first) / DAY_MS) * 10) / 10,
     prior_items: priorItems(item, state),
+    ...(memory ? { agreements: { text: memory.agreements, updated_at: iso(memory.updatedAt), item_id: memory.itemId } } : {}),
   }
 }

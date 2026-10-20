@@ -19,6 +19,7 @@ function fakeHandlers(calls: Call[], overrides: Partial<ChannelHandlers> = {}): 
     listIgnored: rec('listIgnored'),
     say: rec('say'),
     listFeedback: rec('listFeedback'),
+    rememberThread: rec('rememberThread'),
     ...overrides,
   }
 }
@@ -38,10 +39,10 @@ function text(res: Awaited<ReturnType<Client['callTool']>>): string {
   return content.map(c => c.text).join('')
 }
 
-test('lists exactly seven tools: propose, ignore, close, list_items, list_ignored, list_feedback, say', async () => {
+test('lists exactly eight tools: propose, ignore, close, list_items, list_ignored, list_feedback, remember_thread, say', async () => {
   const { client } = await setup()
   const { tools } = await client.listTools()
-  expect(tools.map(t => t.name).sort()).toEqual(['close', 'ignore', 'list_feedback', 'list_ignored', 'list_items', 'propose', 'say'])
+  expect(tools.map(t => t.name).sort()).toEqual(['close', 'ignore', 'list_feedback', 'list_ignored', 'list_items', 'propose', 'remember_thread', 'say'])
   expect(tools.some(t => /slack|send|post/i.test(t.name))).toBe(false)
 })
 
@@ -162,4 +163,16 @@ test('selftest notification carries meta.kind=selftest and meta.source=ping-assi
   const params = await received
   expect(params.meta).toEqual({ source: 'ping-assistant', kind: 'selftest' })
   expect(JSON.parse(params.content)).toEqual({ text: 'selftest' })
+})
+
+test('remember_thread passes item and agreements; rejects empty or longer than 1200 chars', async () => {
+  const { client, calls } = await setup()
+  const ok = await client.callTool({ name: 'remember_thread', arguments: { item_id: '14', agreements: 'Договорённости: …' } })
+  expect(ok.isError).toBeFalsy()
+  expect(text(ok)).toBe('rememberThread ok')
+  for (const agreements of ['', 'x'.repeat(1201)]) {
+    const res = await client.callTool({ name: 'remember_thread', arguments: { item_id: '14', agreements } })
+    expect(res.isError).toBe(true)
+  }
+  expect(calls).toEqual([{ method: 'rememberThread', args: ['14', 'Договорённости: …'] }])
 })

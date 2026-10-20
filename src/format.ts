@@ -136,7 +136,7 @@ type Users = Record<string, string>
 /** The quote of an item is capped; the full text stays one tap away behind the Slack link. */
 export const QUOTE_MAX = 2500
 const HINT = '<i>Правка: ответь цитатой «2, но …» или «: свой текст»</i>'
-const LABEL = /^(Тип|Вопросы|Разбор|Контекст|Уверенность)[^:\n]*:/
+const LABEL = /^(Тип|Вопросы|Разбор|Контекст|Уверенность|Договорённости|Открыто)[^:\n]*:/
 const NUMBERS = ['1️⃣', '2️⃣', '3️⃣']
 
 const TAG = /<(\/?)([a-zA-Z]+)[^<>]*>/g
