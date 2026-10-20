@@ -8,6 +8,7 @@ import { SlackClient } from './slack/client'
 import { Collector } from './slack/collector'
 import { SlackSocket } from './slack/socket'
 import { StateStore } from './state'
+import { notifyStopped, StartupReporter } from './status-report'
 import { TelegramBot } from './telegram/bot'
 
 const log = (kind: string): void => { process.stderr.write(`ping-assistant: ${kind}\n`) }
@@ -17,12 +18,24 @@ const secrets = loadSecrets()
 const store = new StateStore(cfg.statePath)
 const state = store.load()
 const slack = new SlackClient(secrets.slackToken)
+// Startup report: fires after Telegram polls and Slack said hello (or 20s passed); see status-report.ts.
+const reporter = new StartupReporter({
+  log,
+  send: (text) => tg.send(text, undefined, undefined, { plain: true }),
+  collect: async () => ({
+    dryRun: cfg.dryRun,
+    slack: !socket ? 'polling-only' : socket.isConnected() ? 'connected' : 'disconnected',
+    account: await slack.authTest().catch((err) => ({ error: err instanceof Error ? err.message : 'unknown' })),
+    model: process.env.PING_ASSISTANT_MODEL,
+    openItems: Object.values(state.items).filter((i) => i.status === 'awaiting' || i.status === 'settling' || i.status === 'triage').length,
+  }),
+})
 // The collector gets its own client: its per-tick request budget must never block a send or a pre-send thread check.
 const collector = new Collector(new SlackClient(secrets.slackToken), cfg, state, join(dirname(cfg.statePath), 'files'))
 const tg = new TelegramBot(secrets.telegramToken, cfg.telegramChatId)
 // Socket Mode delivers messages within seconds; polling stays as reconciliation and as the fallback while it is down.
 const socket = secrets.slackAppToken
-  ? new SlackSocket(secrets.slackAppToken, { onEvent: (raw) => collector.enqueue(raw, raw.channelType) })
+  ? new SlackSocket(secrets.slackAppToken, { onEvent: (raw) => collector.enqueue(raw, raw.channelType), onHello: () => reporter.slackHello() })
   : undefined
 if (!socket) log('SLACK_APP_TOKEN not set, polling only')
 
@@ -41,6 +54,7 @@ log(`started${cfg.dryRun ? ' (dry-run)' : ''}, ${socket
   ? `socket mode: draining every ${cfg.drainSeconds}s, polling every ${cfg.socketReconcileTicks} ticks while connected`
   : `polling every ${cfg.pollSeconds}s`}`)
 if (cfg.dryRun && cfg.selfDmTest) log('selfDmTest ON (dry-run): own messages in the self-DM become items')
+tg.onPolling(() => reporter.telegramStarted())
 tg.start().catch((err) => log(`telegram stopped: ${err instanceof Error ? err.name : 'unknown'}`))
 
 // Self-test hook: one synthetic notification, to check that a channel event reaches the session.
@@ -54,6 +68,7 @@ async function shutdown(): Promise<void> {
   if (shuttingDown) return
   shuttingDown = true
   log('shutting down')
+  await notifyStopped((text) => tg.send(text, undefined, undefined, { plain: true }))
   orchestrator.stop()
   socket?.stop()
   // A tick commits its cursors only at its end: let it finish, so the final save holds them (bounded: Slack calls time out at 30s).

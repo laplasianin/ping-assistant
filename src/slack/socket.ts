@@ -23,6 +23,8 @@ export type WebSocketLike = {
 
 export type SlackSocketOptions = {
   onEvent: (raw: SocketEvent) => void
+  /** Called on every hello (connection established). */
+  onHello?: () => void
   fetchImpl?: typeof fetch
   wsFactory?: (url: string) => WebSocketLike
   sleep?: (ms: number) => Promise<void>
@@ -218,6 +220,7 @@ export class SlackSocket {
           this.epochNo++
           this.connected = true
           this.log('socket: connected')
+          try { this.opts.onHello?.() } catch {}
         } else if (msg.type === 'disconnect') {
           this.log('socket: disconnect requested')
           end('refresh') // before close(): the close that follows is ours, not news

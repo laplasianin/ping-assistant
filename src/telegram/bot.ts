@@ -165,6 +165,10 @@ export class TelegramBot {
     this.bot.catch((err) => this.log(`handler error (polling continues): ${err.error instanceof Error ? err.error.name : 'unknown'}`))
   }
 
+  private pollingListener: (() => void) | undefined
+  /** Called each time the poller reports it started (after every restart of the loop). */
+  onPolling(fn: () => void): void { this.pollingListener = fn }
+
   async start(): Promise<void> {
     this.claimPidFile()
     await this.poll()
@@ -186,6 +190,7 @@ export class TelegramBot {
             stable = setTimeout(() => { failures = 0; conflicts = 0 }, STABLE_MS)
             stable.unref?.()
             this.log('polling')
+            try { this.pollingListener?.() } catch {}
           })
           return
         } catch (err) {

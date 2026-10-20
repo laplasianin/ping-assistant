@@ -203,6 +203,11 @@ export class SlackClient {
     return res.permalink as string
   }
 
+  async authTest(): Promise<{ user: string; team: string }> {
+    const res = await this.get('auth.test')
+    return { user: String(res.user ?? ''), team: String(res.team ?? '') }
+  }
+
   async postMessage(channel: string, text: string, threadTs?: string): Promise<{ ts: string }> {
     const body = JSON.stringify({ channel, text, ...(threadTs ? { thread_ts: threadTs } : {}) })
     const res = await this.send('chat.postMessage', {
