@@ -77,12 +77,12 @@ describe('renderItem', () => {
     expect(text).toContain('<blockquote expandable>Когда релиз?\n\nКто тестирует?</blockquote>')
     expect(text.match(/<blockquote/g)).toHaveLength(1)
   })
-  test('the quote is capped at 2500 chars on a line boundary, tags stay balanced', () => {
+  test('the quote is capped at 1500 chars on a line boundary, tags stay balanced', () => {
     const line = `*${'ж'.repeat(98)}*`
     const long = Array.from({ length: 60 }, () => line).join('\n')
     const { text } = renderItem(item({ messages: [msg(long, { permalink: 'https://slack/p1' })] }), {}, {}, NOW)
     const quote = text.slice(text.indexOf('<blockquote'), text.indexOf('</blockquote>') + '</blockquote>'.length)
-    expect(quote.length).toBeLessThanOrEqual(2500 + 100)
+    expect(quote.length).toBeLessThanOrEqual(1500 + 100)
     expect(quote).toEndWith('\n…</blockquote>')
     expect(quote).not.toContain('ж*') // cut between lines: every line still converted whole
     expect(quote.match(/<b>/g)!.length).toBe(quote.match(/<\/b>/g)!.length)
@@ -300,5 +300,102 @@ describe('reference lines', () => {
     expect(text.match(/🔗/g)).toHaveLength(3)
     expect(text).not.toContain('PR #7')
     expect(renderItem(item({ references: { jira: [], prs: [], unresolved: ['PF-1'], fetchedAt: NOW } }), {}, {}, NOW).text).not.toContain('🔗')
+  })
+})
+
+describe('renderItem context block', () => {
+  const hhmm = (ts: string): string => {
+    const d = new Date(Number(ts) * 1000)
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  }
+  const ctx = (ts: string, user: string, text: string, userName?: string): SlackMsg =>
+    msg(text, { ts, user, ...(userName ? { userName } : {}) })
+  const block = (text: string): string | undefined => {
+    const all = [...text.matchAll(/<blockquote expandable>[\s\S]*?<\/blockquote>/g)].map((m) => m[0])
+    return all[1]
+  }
+  const thread = (extra: Partial<Item> = {}) => item({
+    threadTs: '1000.000000', messages: [msg('Вопрос', { ts: '5000.000000', permalink: 'https://slack/p1' })], ...extra,
+  })
+
+  test('a thread item gets a second expandable quote with title, count and compact lines, before the link', () => {
+    const context = [ctx('1000.000000', 'U3', 'корень', 'Ann'), ctx('1001.000000', 'U4', 'ответ')]
+    const { text } = renderItem(thread({ context }), {}, {}, NOW, 'ME')
+    expect(block(text)).toBe(
+      '<blockquote expandable><b>Тред · 2 сообщения</b>\n'
+        + `${hhmm('1000.000000')} Ann: корень\n${hhmm('1001.000000')} @U4: ответ</blockquote>`,
+    )
+    expect(text.indexOf(block(text)!)).toBeLessThan(text.indexOf('Открыть в Slack'))
+    expect(text.indexOf('<blockquote expandable>Вопрос</blockquote>')).toBeLessThan(text.indexOf(block(text)!))
+  })
+
+  test('messages already quoted are not repeated; nothing left → no block', () => {
+    const own = msg('Вопрос', { ts: '5000.000000' })
+    expect(block(renderItem(thread({ context: [own] }), {}, {}, NOW).text)).toBeUndefined()
+    const { text } = renderItem(thread({ context: [ctx('1001.000000', 'U4', 'ранее'), own] }), {}, {}, NOW)
+    expect(block(text)).toContain('<b>Тред · 1 сообщение</b>')
+    expect(block(text)!.match(/Вопрос/g)).toBeNull()
+  })
+
+  test('no context → no block', () => {
+    const { text } = renderItem(thread(), {}, {}, NOW)
+    expect(text.match(/<blockquote/g)).toHaveLength(1)
+  })
+
+  test('own messages show as «Я», names come from userName or the users cache', () => {
+    const context = [ctx('1000.000000', 'ME', 'мой ответ', 'Ilya'), ctx('1001.000000', 'U5', 'привет')]
+    const b = block(renderItem(thread({ context }), { U5: 'Bob' }, {}, NOW, 'ME').text)!
+    expect(b).toContain(' Я: мой ответ')
+    expect(b).toContain(' Bob: привет')
+  })
+
+  test('DM and MPIM top-level items are titled «Переписка»', () => {
+    for (const source of ['im', 'mpim'] as const) {
+      const it = item({ source, messages: [msg('Вопрос', { ts: '1003.000000' })], context: [ctx('1001.000000', 'U4', 'a')] })
+      expect(block(renderItem(it, {}, {}, NOW).text)).toContain('<b>Переписка · 1 сообщение</b>')
+    }
+  })
+
+  test('long messages are trimmed to 200 chars with «…», newlines collapse, Slack markup converts', () => {
+    const context = [ctx('1000.000000', 'U3', `*важно*\nвторая\n\nтретья ${'я'.repeat(300)}`, 'Ann')]
+    const b = block(renderItem(thread({ context }), {}, {}, NOW).text)!
+    const line = b.split('\n')[1]!
+    expect(line).toStartWith(`${hhmm('1000.000000')} Ann: <b>важно</b> вторая третья я`)
+    expect(line).toEndWith('я…</blockquote>')
+    expect(line.match(/я/g)!.length).toBeLessThan(200)
+  })
+
+  test('names and text are HTML-escaped', () => {
+    const context = [ctx('1000.000000', 'U3', 'a < b & c', 'A<b>&')]
+    const b = block(renderItem(thread({ context }), {}, {}, NOW).text)!
+    expect(b).toContain(' A&lt;b&gt;&amp;: a &lt; b &amp; c')
+  })
+
+  test('over budget: the newest messages are kept and «… ещё K сообщений выше» comes first', () => {
+    const context = Array.from({ length: 40 }, (_, i) => ctx(`${1000 + i}.000000`, 'U3', `m${i} ${'x'.repeat(150)}`, 'Ann'))
+    const b = block(renderItem(thread({ context }), {}, {}, NOW).text)!
+    expect(b.length).toBeLessThanOrEqual(1800)
+    const lines = b.split('\n')
+    expect(lines[0]).toBe('<blockquote expandable><b>Тред · 40 сообщений</b>')
+    const kept = lines.length - 2
+    expect(lines[1]).toMatch(new RegExp(`^… ещё ${40 - kept} сообщени[еяй] выше$`))
+    expect(b).toContain(' Ann: m39 ')
+    expect(b).not.toContain(' Ann: m0 ')
+    expect(lines.at(-1)).toContain(`m39`)
+  })
+
+  test('a long item and a long context stay one valid first chunk', () => {
+    const long = Array.from({ length: 60 }, () => `*${'ж'.repeat(98)}*`).join('\n')
+    const context = Array.from({ length: 40 }, (_, i) => ctx(`${1000 + i}.000000`, 'U3', `<@U9> *m${i}* ${'&lt;'.repeat(60)}`, 'Ann'))
+    const it = thread({ messages: [msg(long, { ts: '1050.000000', permalink: 'https://slack/p1' })], context })
+    const { text } = renderItem(it, {}, {}, NOW, 'ME')
+    const first = chunk(text)[0]!
+    expect(first.length).toBeLessThanOrEqual(4096)
+    expect(first).toContain('<b>Тред · 40 сообщений</b>')
+    expect(first).toContain('Открыть в Slack</a>')
+    const opens = (t: string) => (first.match(new RegExp(`<${t}[ >]`, 'g')) ?? []).length
+    const closes = (t: string) => (first.match(new RegExp(`</${t}>`, 'g')) ?? []).length
+    for (const t of ['blockquote', 'b', 'a']) expect(opens(t)).toBe(closes(t))
+    expect(first.match(/<blockquote/g)).toHaveLength(2)
   })
 })

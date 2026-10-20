@@ -134,7 +134,11 @@ function age(ms: number): string {
 type Users = Record<string, string>
 
 /** The quote of an item is capped; the full text stays one tap away behind the Slack link. */
-export const QUOTE_MAX = 2500
+export const QUOTE_MAX = 1500
+/** The collapsed thread/conversation block under it, whole (tags included): the newest messages that fit. */
+export const CONTEXT_MAX = 1800
+/** One message of that block, in characters of Slack text before conversion. */
+export const CONTEXT_LINE_MAX = 200
 const HINT = '<i>Правка: ответь цитатой «2, но …» или «: свой текст»</i>'
 const LABEL = /^(Тип|Вопросы|Разбор|Контекст|Уверенность|Договорённости|Открыто)[^:\n]*:/
 const NUMBERS = ['1️⃣', '2️⃣', '3️⃣']
@@ -177,22 +181,69 @@ function quote(msgs: SlackMsg[], users: Users, channels: Users): string {
   return q ? `<blockquote expandable>${q}</blockquote>` : ''
 }
 
+/** «1 сообщение», «2 сообщения», «5 сообщений». */
+function messages(n: number): string {
+  const d = n % 10
+  const dd = n % 100
+  const word = d === 1 && dd !== 11 ? 'сообщение' : d >= 2 && d <= 4 && (dd < 12 || dd > 14) ? 'сообщения' : 'сообщений'
+  return `${n} ${word}`
+}
+
+const hhmm = (ts: string): string => {
+  const d = new Date(Number(ts) * 1000)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+/** «HH:MM Имя: текст» on one line, the text trimmed to CONTEXT_LINE_MAX; the user's own messages are «Я». */
+function contextLine(m: SlackMsg, users: Users, channels: Users, selfId?: string): string {
+  const name = selfId !== undefined && m.user === selfId ? 'Я' : (m.userName ?? users[m.user] ?? `@${m.user}`)
+  const flat = m.text.replace(/```/g, '`').replace(/\s*\n\s*/g, ' ').trim()
+  const chars = [...flat]
+  const text = chars.length > CONTEXT_LINE_MAX ? `${chars.slice(0, CONTEXT_LINE_MAX).join('').trimEnd()}…` : flat
+  return `${hhmm(m.ts)} ${escapeHtml(name)}: ${slackToHtml(text, users, channels)}`
+}
+
+/**
+ * The item's thread (or, top-level, the conversation before it) as a second expandable blockquote: the messages not
+ * already quoted, oldest first, the newest that fit CONTEXT_MAX; '' when there is nothing beyond the item itself.
+ */
+function contextBlock(item: Item, users: Users, channels: Users, selfId?: string): string {
+  const own = new Set(item.messages.map((m) => m.ts))
+  const msgs = item.context.filter((m) => !own.has(m.ts)).sort((a, b) => Number(a.ts) - Number(b.ts))
+  if (!msgs.length) return ''
+  const title = `<b>${item.threadTs ? 'Тред' : 'Переписка'} · ${messages(msgs.length)}</b>`
+  const wrap = (lines: string[]): string => `<blockquote expandable>${[title, ...lines].join('\n')}</blockquote>`
+  const lines = msgs.map((m) => contextLine(m, users, channels, selfId))
+  let kept: string[] = []
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const next = [lines[i]!, ...kept]
+    const more = i > 0 ? [`… ещё ${messages(i)} выше`] : []
+    if (wrap([...more, ...next]).length > CONTEXT_MAX) break
+    kept = next
+  }
+  const dropped = lines.length - kept.length
+  return wrap(dropped ? [`… ещё ${messages(dropped)} выше`, ...kept] : kept)
+}
+
 const analysisHtml = (analysis: string): string =>
   escapeHtml(analysis).split('\n').map((line) => line.replace(LABEL, '<b>$&</b>')).join('\n')
 
 /** The 👎 row of an item message: it outlives the item's other buttons (see ItemMessages.annotate). */
 export const feedbackKeyboard = (itemId: string): Keyboard => [[{ label: '👎 разбор', data: callbackData({ kind: 'bad', itemId }) }]]
 
+/** selfId: the user's own Slack id, shown as «Я» in the context block. */
 export function renderItem(
-  item: Item, users: Users, channels: Users, now: number,
+  item: Item, users: Users, channels: Users, now: number, selfId?: string,
 ): { text: string; keyboard: Keyboard } {
   const where = item.source === 'im' ? 'личка' : `#${item.channelName ?? item.channel}`
   const header = `<b>#${escapeHtml(item.id)}</b> · ${escapeHtml(where)} · ${escapeHtml(item.authorName ?? item.author)} · ${age(now - item.lastMessageAt)}`
   const variants = item.variants ?? []
-  // Header, quote and link stay one paragraph: chunk() never splits it, and the cap keeps it well under 4096.
+  // Header, quotes and link stay one paragraph: chunk() never splits it, and the caps keep it well under 4096.
   const top = [header]
   const q = quote(item.messages, users, channels)
   if (q) top.push(q)
+  const c = contextBlock(item, users, channels, selfId)
+  if (c) top.push(c)
   top.push(...referenceLines(item))
   const permalink = item.messages[0]?.permalink
   if (permalink) top.push(isWebUrl(permalink) ? link(permalink, 'Открыть в Slack') : escapeHtml(permalink))

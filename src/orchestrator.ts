@@ -277,7 +277,7 @@ export class Orchestrator {
       this.save()
       return `#${id}: final text shown to Ilya, waiting for confirmation`
     }
-    const r = renderItem({ ...item, analysis, variants }, state.users, state.channels, this.now())
+    const r = renderItem({ ...item, analysis, variants }, state.users, state.channels, this.now(), this.d.cfg.userId)
     const mid = await show(r.text, r.keyboard)
     await this.msgs.annotate(item, '✏️ правка ниже') // old message, still described by item.telegram
     await this.msgs.retire(item)
@@ -354,7 +354,7 @@ export class Orchestrator {
         this.clearHeld(item)
         await this.msgs.retire(item, messageId)
         if (item.telegram.messageId !== undefined && item.variants) {
-          const r = renderItem(item, state.users, state.channels, this.now())
+          const r = renderItem(item, state.users, state.channels, this.now(), this.d.cfg.userId)
           await this.msgs.edit(item.telegram.messageId, lastPart(r.text), r.keyboard)
         }
       }

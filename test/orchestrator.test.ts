@@ -208,6 +208,20 @@ test('propose(variants) sends telegram message with buttons and sets awaiting', 
   expect(e.tg.resolveItemId(sent.id)).toBe('1')
 })
 
+test('a thread item message carries the collapsed thread block, own replies as «Я»', async () => {
+  const e = await setup()
+  e.slack.repl['C1:100.000000'] = [
+    { ts: '100.000000', user: 'U3', text: 'root' },
+    { ts: '103.000000', user: 'ME', text: 'мой ответ' },
+    { ts: '105.000000', user: 'U2', text: 'Почему падает сборка?' },
+  ]
+  await matureThreadItem(e)
+  const sent = await propose(e, ['Да'])
+  expect(sent.text).toContain('<blockquote expandable><b>Тред · 2 сообщения</b>\n')
+  expect(sent.text).toContain(' Я: мой ответ')
+  expect(sent.text.match(/Почему падает сборка\?/g)).toHaveLength(1)
+})
+
 test('choose sends variant verbatim to slack in thread and edits outcome', async () => {
   const e = await setup()
   await matureThreadItem(e)
