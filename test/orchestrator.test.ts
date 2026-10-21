@@ -423,6 +423,33 @@ test('say goes to Telegram as plain text, with no parse_mode', async () => {
   expect(e.api.last().opts.parse_mode).toBeUndefined()
 })
 
+test('say with format html goes out with parse_mode HTML; format text is plain', async () => {
+  const e = await setup()
+  const html = '☀️ <b>Брифинг 21.10</b>\n<a href="https://slack/C1/1.0">#1</a> a &amp; b'
+  expect((await e.client.callTool({ name: 'say', arguments: { text: html, format: 'html' } })).isError).toBeFalsy()
+  expect(e.api.last().text).toBe(html)
+  expect(e.api.last().opts.parse_mode).toBe('HTML')
+  await e.client.callTool({ name: 'say', arguments: { text: '<b>x</b>', format: 'text' } })
+  expect(e.api.last().text).toBe('<b>x</b>')
+  expect(e.api.last().opts.parse_mode).toBeUndefined()
+})
+
+test('say html that Telegram cannot parse is resent once with the tags stripped', async () => {
+  const e = await setup()
+  const real = e.api.sendMessage.bind(e.api)
+  let rejected = 0
+  e.api.sendMessage = async (chat, text, opts = {}) => {
+    if (opts.parse_mode === 'HTML') { rejected++; throw new Error("Bad Request: can't parse entities: Unsupported start tag") }
+    return real(chat, text, opts)
+  }
+  const res = await e.client.callTool({ name: 'say', arguments: { text: '<b>Ждут тебя</b> <foo>a</foo> &lt; b', format: 'html' } })
+  expect(res.isError).toBeFalsy()
+  expect(rejected).toBe(1)
+  expect(e.api.sent).toHaveLength(1)
+  expect(e.api.last().text).toBe('Ждут тебя a < b')
+  expect(e.api.last().opts.parse_mode).toBeUndefined()
+})
+
 test('item messages and outcome edits go out with parse_mode HTML', async () => {
   const e = await setup()
   await matureThreadItem(e)
@@ -1699,7 +1726,8 @@ test('«брифинг» in chat sends the briefing now without moving the sched
   expect(e.notes.filter((n) => n.meta.kind === 'chat')).toEqual([])
   expect(briefings(e)).toHaveLength(1)
   const body = JSON.parse(briefings(e)[0]!.content)
-  expect(body.ignored).toEqual([{ id: '1', channel: 'C1', author: 'User U2', reason: 'благодарность', at: new Date(T0 + 91_000 + MIN_MS).toISOString() }])
+  expect(body.ignored).toEqual([{ id: '1', channel: 'C1', author: 'User U2', reason: 'благодарность', at: new Date(T0 + 91_000 + MIN_MS).toISOString(),
+    channel_short: 'C1', permalink: 'https://slack/C1/105.000000' }])
   expect(body.feedback_count).toBe(1)
   expect(e.state.lastBriefingAt).toBe(T0)
   // Anything else is still chat.

@@ -244,8 +244,9 @@ export class Orchestrator {
         this.d.state.threads[threadKey(item)] = { agreements, updatedAt: this.now(), itemId: item.id }
         return done(`#${id}: agreements saved`)
       },
-      say: async (text) => {
-        await tg.send(text, undefined, undefined, { plain: true }) // free text from the session: a stray < must not break it
+      say: async (text, format) => {
+        // 'text': free text from the session, a stray < must not break it; 'html': the HTML path with its plain fallback.
+        await tg.send(text, undefined, undefined, { plain: format === 'text' })
         return 'sent to Telegram'
       },
     }

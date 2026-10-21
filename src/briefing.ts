@@ -1,6 +1,7 @@
 // Morning briefing: what happened since the last one and what still waits, as JSON for the session (kind briefing).
 // Carries Slack text (first_line) to the session only; nothing here is ever logged.
 import type { BriefingCron, Config } from './config'
+import { humanizeSlack } from './format'
 import type { Item, State } from './state'
 
 const DAY_MS = 86_400_000
@@ -10,18 +11,44 @@ const MIN_MS = 60_000
 /** The session needs a few notable ignores to spot wrong triage, not the whole journal. */
 export const BRIEFING_IGNORED_MAX = 20
 const FIRST_LINE_MAX = 80
+/** A channel name in a briefing line: long project names would eat the phone-width line. */
+export const CHANNEL_SHORT_MAX = 18
+const NO_TEXT = '(без текста)'
+
+/** Where an item lives, for a briefing line: «личка», «группа», or the channel name without # and project prefix. */
+type Where = { channel_short: string; permalink?: string }
 
 export type Briefing = {
   since: string
-  ignored: { id: string; channel: string; author: string; reason: string; at: string }[]
+  ignored: ({ id: string; channel: string; author: string; reason: string; at: string } & Where)[]
   /** All items ignored since `since`; `ignored` holds only the latest BRIEFING_IGNORED_MAX of them. */
   ignored_total: number
-  awaiting: { id: string; channel: string; author: string; age_minutes: number; first_line: string }[]
-  stuck: { id: string; status: string; age_minutes: number }[]
-  answered: { id: string; channel: string; chosen: number | 'custom' | null; sent_at: string }[]
-  manual: { id: string; channel: string }[]
+  awaiting: ({ id: string; channel: string; author: string; age_minutes: number; first_line: string } & Where)[]
+  stuck: ({ id: string; status: string; age_minutes: number } & Where)[]
+  answered: ({ id: string; channel: string; chosen: number | 'custom' | null; sent_at: string } & Where)[]
+  manual: ({ id: string; channel: string } & Where)[]
   feedback_count: number
   today: string
+}
+
+/** Slack emoji codes worth keeping in a one-line summary; any other `:code:` is dropped. */
+const EMOJI: Record<string, string> = {
+  thinking_face: '🤔', white_check_mark: '✅', eyes: '👀', pray: '🙏', fire: '🔥', tada: '🎉',
+  '+1': '👍', thumbsup: '👍', melting_face: '🫠', raised_hands: '🙌',
+}
+// A code starts with a letter (or is +1), so clock times like 10:30:00 are left alone.
+const EMOJI_CODE = /:([a-z][a-z0-9_+-]*|\+1):/g
+
+/** Slack `:emoji:` codes → the emoji when known, otherwise removed; whitespace collapsed. */
+export function emojify(text: string): string {
+  return text.replace(EMOJI_CODE, (_, code: string) => EMOJI[code] ?? '').replace(/\s+/g, ' ').trim()
+}
+
+/** «личка» for IMs, «группа» for MPIMs, else the channel name without # and the proj-scentbird- / proj- prefix, capped. */
+export function channelShort(source: Item['source'], channelId: string, name: string): string {
+  if (source === 'im' || channelId.startsWith('D')) return 'личка'
+  if (source === 'mpim' || name.startsWith('mpdm-')) return 'группа'
+  return name.replace(/^#/, '').replace(/^proj-scentbird-/, '').replace(/^proj-/, '').slice(0, CHANNEL_SHORT_MAX)
 }
 
 /**
@@ -54,22 +81,30 @@ export function briefingPayload(state: State, cfg: Config, now: number, lastBrie
   const channel = (i: Item): string => i.channelName ?? state.channels[i.channel] ?? i.channel
   const author = (i: Item): string => i.authorName ?? state.users[i.author] ?? i.author
   const age = (i: Item): number => Math.floor((now - i.createdAt) / MIN_MS)
+  const where = (i: Item): Where => {
+    const permalink = i.messages[0]?.permalink
+    return { channel_short: channelShort(i.source, i.channel, channel(i)), ...(permalink ? { permalink } : {}) }
+  }
+  const firstLine = (i: Item): string => {
+    const first = i.messages[0]
+    const line = humanizeSlack(first?.text ?? '', state.users, state.channels).split('\n').map(emojify).find((l) => l !== '')
+    return (line ?? first?.files?.[0]?.name ?? NO_TEXT).slice(0, FIRST_LINE_MAX)
+  }
   const closedSince = (status: Item['status']): Item[] =>
     items.filter((i) => i.status === status && closedAt(i) >= since).sort((a, b) => closedAt(b) - closedAt(a))
   const ignored = closedSince('ignored')
   return {
     since: iso(since),
     ignored: ignored.slice(0, BRIEFING_IGNORED_MAX)
-      .map((i) => ({ id: i.id, channel: channel(i), author: author(i), reason: i.ignoreReason ?? '', at: iso(closedAt(i)) })),
+      .map((i) => ({ id: i.id, channel: channel(i), author: author(i), reason: i.ignoreReason ?? '', at: iso(closedAt(i)), ...where(i) })),
     ignored_total: ignored.length,
     awaiting: items.filter((i) => i.status === 'awaiting').sort(newestFirst).map((i) => ({
-      id: i.id, channel: channel(i), author: author(i), age_minutes: age(i),
-      first_line: (i.messages[0]?.text ?? '').split('\n')[0]!.trim().slice(0, FIRST_LINE_MAX),
+      id: i.id, channel: channel(i), author: author(i), age_minutes: age(i), first_line: firstLine(i), ...where(i),
     })),
     stuck: items.filter((i) => (i.status === 'settling' || i.status === 'triage') && now - i.createdAt >= cfg.triageTimeoutSeconds * 1000)
-      .sort(newestFirst).map((i) => ({ id: i.id, status: i.status, age_minutes: age(i) })),
-    answered: closedSince('sent').map((i) => ({ id: i.id, channel: channel(i), chosen: i.sentChoice ?? null, sent_at: iso(closedAt(i)) })),
-    manual: closedSince('answered_manually').map((i) => ({ id: i.id, channel: channel(i) })),
+      .sort(newestFirst).map((i) => ({ id: i.id, status: i.status, age_minutes: age(i), ...where(i) })),
+    answered: closedSince('sent').map((i) => ({ id: i.id, channel: channel(i), chosen: i.sentChoice ?? null, sent_at: iso(closedAt(i)), ...where(i) })),
+    manual: closedSince('answered_manually').map((i) => ({ id: i.id, channel: channel(i), ...where(i) })),
     feedback_count: state.feedback.filter((f) => f.at >= since).length,
     today: localDate(now),
   }

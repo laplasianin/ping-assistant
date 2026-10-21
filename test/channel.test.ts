@@ -104,6 +104,8 @@ test('routes ignore, close, list_items, list_ignored and say to handlers', async
   await client.callTool({ name: 'list_ignored', arguments: {} })
   await client.callTool({ name: 'list_ignored', arguments: { since_hours: 2 } })
   await client.callTool({ name: 'say', arguments: { text: 'hi' } })
+  await client.callTool({ name: 'say', arguments: { text: '<b>hi</b>', format: 'html' } })
+  await client.callTool({ name: 'say', arguments: { text: 'hi', format: 'text' } })
   expect(calls).toEqual([
     { method: 'ignore', args: ['3', 'thanks only'] },
     { method: 'close', args: ['4'] },
@@ -111,7 +113,9 @@ test('routes ignore, close, list_items, list_ignored and say to handlers', async
     { method: 'listItems', args: [undefined] },
     { method: 'listIgnored', args: [24] },
     { method: 'listIgnored', args: [2] },
-    { method: 'say', args: ['hi'] },
+    { method: 'say', args: ['hi', 'text'] },
+    { method: 'say', args: ['<b>hi</b>', 'html'] },
+    { method: 'say', args: ['hi', 'text'] },
   ])
 })
 
@@ -119,6 +123,7 @@ test('rejects unknown status and missing arguments', async () => {
   const { client, calls } = await setup()
   expect((await client.callTool({ name: 'list_items', arguments: { status: 'bogus' } })).isError).toBe(true)
   expect((await client.callTool({ name: 'say', arguments: {} })).isError).toBe(true)
+  expect((await client.callTool({ name: 'say', arguments: { text: 'hi', format: 'markdown' } })).isError).toBe(true)
   expect((await client.callTool({ name: 'send_to_slack', arguments: {} })).isError).toBe(true)
   expect(calls).toEqual([])
 })

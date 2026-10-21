@@ -16,13 +16,15 @@ export type ChannelHandlers = {
   close(itemId: string): Promise<string>
   listItems(status?: ItemStatus): Promise<string>
   listIgnored(sinceHours: number): Promise<string>
-  /** Plain text to Telegram, no buttons. */
-  say(text: string): Promise<string>
+  /** Text to Telegram, no buttons: 'text' as is, 'html' with parse_mode HTML (plain fallback if Telegram rejects the markup). */
+  say(text: string, format: SayFormat): Promise<string>
   /** Ilya's 👎 / «фидбек: …» entries from the last sinceDays days, as compact text. */
   listFeedback(sinceDays: number): Promise<string>
   /** Stores the session's «Договорённости / Открыто» summary for the item's conversation (later items get it in thread.agreements). */
   rememberThread(itemId: string, agreements: string): Promise<string>
 }
+
+export type SayFormat = 'text' | 'html'
 
 const STATUS_SET: Record<ItemStatus, true> = {
   settling: true, triage: true, ignored: true, awaiting: true, sent: true, skipped: true, answered_manually: true,
@@ -51,7 +53,7 @@ const IgnoreArgs = z.object({ item_id: z.string().min(1), reason: z.string().min
 const CloseArgs = z.object({ item_id: z.string().min(1) })
 const ListItemsArgs = z.object({ status: z.enum(STATUSES).optional() })
 const ListIgnoredArgs = z.object({ since_hours: z.number().positive().default(24) })
-const SayArgs = z.object({ text: z.string().min(1) })
+const SayArgs = z.object({ text: z.string().min(1), format: z.enum(['text', 'html']).default('text') })
 const ListFeedbackArgs = z.object({ since_days: z.number().positive().default(7) })
 /** remember_thread: a compact summary, not a transcript. */
 export const AGREEMENTS_MAX = 1200
@@ -116,8 +118,12 @@ const TOOLS = [
   },
   {
     name: 'say',
-    description: 'Send plain text to Ilya in Telegram (no buttons). Never reaches Slack.',
-    inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+    description: "Send a message to Ilya in Telegram (no buttons). Never reaches Slack. format 'text' (default): sent as is. format 'html': Telegram HTML (<b>, <i>, <a href>; escape & < > in dynamic text); if Telegram rejects the markup it is resent with the tags stripped.",
+    inputSchema: {
+      type: 'object',
+      properties: { text: { type: 'string' }, format: { type: 'string', enum: ['text', 'html'], description: "Default 'text'." } },
+      required: ['text'],
+    },
   },
 ]
 
@@ -158,8 +164,10 @@ export class Channel {
         return h.listItems(ListItemsArgs.parse(args).status)
       case 'list_ignored':
         return h.listIgnored(ListIgnoredArgs.parse(args).since_hours)
-      case 'say':
-        return h.say(SayArgs.parse(args).text)
+      case 'say': {
+        const a = SayArgs.parse(args)
+        return h.say(a.text, a.format)
+      }
       case 'list_feedback':
         return h.listFeedback(ListFeedbackArgs.parse(args).since_days)
       case 'remember_thread': {
