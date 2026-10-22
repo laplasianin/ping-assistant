@@ -322,7 +322,7 @@ test('forward with "2, но без тикета" notifies channel kind=revise wi
     content: JSON.stringify({ id: '1', request: '2, но без тикета', variants: ['a', 'b с тикетом'], analysis: 'Тип: технический' }),
     meta: { kind: 'revise', item_id: '1', source: 'ping-assistant' },
   })
-  expect(e.notes[1]).toEqual({ content: JSON.stringify({ text: 'как дела?' }), meta: { kind: 'chat', source: 'ping-assistant' } })
+  expect(e.notes[1]).toEqual({ content: JSON.stringify({ text: 'как дела?', recent_chat: [] }), meta: { kind: 'chat', source: 'ping-assistant' } })
   expect(e.slack.posted).toEqual([])
 })
 
@@ -1754,4 +1754,92 @@ test('sent, skipped and manually answered items record when they closed', async 
   await e.callback(`pa:skip:${followup.id}`, e.api.last().id)
   expect(followup.status).toBe('skipped')
   expect(followup.closedAt).toBe(T0 + 91_000 + MIN_MS + 91_000)
+})
+
+// --- free-form chat requests ---
+
+const chats = (e: Awaited<ReturnType<typeof setup>>) => e.notes.filter((n) => n.meta.kind === 'chat').map((n) => JSON.parse(n.content))
+
+test('a long or question chat text is acked «👀 смотрю…» quoting it, before the session is notified', async () => {
+  const e = await setup()
+  await e.text('подбери мне тикет из PF')
+  await e.flush()
+  expect(e.api.sent).toHaveLength(1)
+  expect(e.api.last().text).toBe('👀 смотрю…')
+  expect(e.api.last().opts.reply_parameters).toEqual({ message_id: 999 })
+  expect(chats(e)).toEqual([{ text: 'подбери мне тикет из PF', recent_chat: [] }])
+
+  await e.text('а второй?')
+  await e.flush()
+  expect(e.api.sent).toHaveLength(2)
+  expect(e.api.last().text).toBe('👀 смотрю…')
+})
+
+test('a short chat text is forwarded without an ack', async () => {
+  const e = await setup()
+  await e.text('спасибо')
+  await e.flush()
+  expect(e.api.sent).toEqual([])
+  expect(chats(e)).toEqual([{ text: 'спасибо', recent_chat: [] }])
+})
+
+test('a failed ack still forwards the request to the session', async () => {
+  const e = await setup()
+  e.api.failNextSend = true
+  await e.text('что происходит с релизом мексики?')
+  await e.flush()
+  expect(chats(e)).toHaveLength(1)
+})
+
+test('«брифинг» is still intercepted (no ack, no chat, no log); «что по фидбеку?» still reaches the session without an ack', async () => {
+  const e = await setup()
+  await e.text('брифинг')
+  await e.flush()
+  expect(e.notes.map((n) => n.meta.kind)).toEqual(['briefing'])
+  expect(e.api.sent).toEqual([])
+  expect(e.state.chatLog).toEqual([])
+
+  await e.text('что по фидбеку?')
+  await e.flush()
+  expect(e.api.sent).toEqual([])
+  expect(chats(e)).toEqual([{ text: 'что по фидбеку?', recent_chat: [] }])
+})
+
+test('chat payload carries recent_chat: earlier chat texts and say replies, oldest first', async () => {
+  const e = await setup()
+  await e.text('подбери мне тикет из PF')
+  e.advance(1000)
+  await e.client.callTool({ name: 'say', arguments: { text: '<b>PF-1</b> и PF-2', format: 'html' } })
+  e.advance(1000)
+  await e.text('а второй?')
+  await e.flush()
+
+  expect(e.state.chatLog.map((x) => x.from)).toEqual(['user', 'assistant', 'user'])
+  expect(chats(e)[1]).toEqual({
+    text: 'а второй?',
+    recent_chat: [
+      { at: new Date(T0).toISOString(), from: 'user', text: 'подбери мне тикет из PF' },
+      { at: new Date(T0 + 1000).toISOString(), from: 'assistant', text: '<b>PF-1</b> и PF-2' },
+    ],
+  })
+})
+
+test('say appends to chatLog; the log is capped and the payload holds only the last entries', async () => {
+  const e = await setup()
+  for (let i = 0; i < 45; i++) await e.client.callTool({ name: 'say', arguments: { text: `ответ ${i}` } })
+  expect(e.state.chatLog).toHaveLength(40)
+  expect(e.state.chatLog[0]!.text).toBe('ответ 5')
+  await e.text('и что дальше?')
+  await e.flush()
+  const recent = chats(e)[0].recent_chat
+  expect(recent).toHaveLength(12)
+  expect(recent.at(-1)).toMatchObject({ from: 'assistant', text: 'ответ 44' })
+})
+
+test('chat log older than 7 days is dropped by the hourly prune', async () => {
+  const e = await setup()
+  await e.text('старый вопрос?')
+  e.advance(8 * 86_400_000)
+  await e.orch.tick()
+  expect(e.state.chatLog).toEqual([])
 })

@@ -2,6 +2,7 @@
 // Invariant: only sendToSlack calls slack.postMessage, and only on Ilya's command from Telegram.
 import type { Channel, ChannelHandlers } from './channel'
 import { briefingPayload, lastBriefingMoment } from './briefing'
+import { forwardChat, logChat } from './chat'
 import { callbackData, type Command } from './commands'
 import type { Config, ReviewCron } from './config'
 import { escapeHtml, outcome, renderItem, renderProposal, renderThreadChanged, renderUpdate, slackify, type Keyboard } from './format'
@@ -247,6 +248,8 @@ export class Orchestrator {
       say: async (text, format) => {
         // 'text': free text from the session, a stray < must not break it; 'html': the HTML path with its plain fallback.
         await tg.send(text, undefined, undefined, { plain: format === 'text' })
+        logChat(this.d.state, 'assistant', text, this.now())
+        this.save()
         return 'sent to Telegram'
       },
     }
@@ -315,7 +318,7 @@ export class Orchestrator {
         await this.d.channel.notify(JSON.stringify(body), { kind: 'revise', item_id: item.id })
       } else {
         if (!c.itemId && BRIEFING_ASK.test(c.text.trim())) return this.sendBriefing(this.now())
-        await this.d.channel.notify(JSON.stringify({ text: c.text, ...(c.itemId ? { itemId: c.itemId } : {}) }), { kind: 'chat' })
+        await forwardChat(this.d, c.text, c.itemId, messageId, this.now(), (err) => log(`chat ack failed: ${errName(err)}`))
       }
       return
     }

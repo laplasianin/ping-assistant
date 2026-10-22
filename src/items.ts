@@ -1,4 +1,5 @@
 import type { Config } from './config'
+import { pruneChatLog } from './chat'
 import { cmpTs, SEARCH_LAG_S } from './slack/collector'
 import { OWN_MSG, type Item, type ItemSource, type ItemStatus, type SlackMsg, type State } from './state'
 
@@ -139,6 +140,7 @@ export function prune(state: State, now: number, cfg: Config): boolean {
   for (const [key, t] of Object.entries(state.threads)) {
     if (t.updatedAt < threadCutoff) { delete state.threads[key]; removed++ }
   }
+  if (pruneChatLog(state, now)) removed++
   return pruned.size > 0 || removed > 0
 }
 

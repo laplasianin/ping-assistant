@@ -31,6 +31,8 @@ export type FeedbackEntry = {
 export const FEEDBACK_MAX = 500
 /** The session's «Договорённости / Открыто» summary of a conversation (remember_thread), pruned after followUpDays × 4. */
 export type ThreadMemory = { agreements: string; updatedAt: number; itemId: string }
+/** One line of the Telegram conversation with the session (chat forwards and say replies), for recent_chat. */
+export type ChatEntry = { at: number; from: 'user' | 'assistant'; text: string }
 export type State = {
   cursors: Record<string, string>;            // ключ: `hist:${channel}` | `thr:${channel}:${threadTs}` | 'search' | 'dmsearch' | 'lastTick'
   items: Record<string, Item>; nextSeq: number;
@@ -47,10 +49,11 @@ export type State = {
   lastFeedbackReviewAt?: number;              // when the weekly feedback review last ran
   lastBriefingAt?: number;                    // when the scheduled morning briefing last ran
   threads: Record<string, ThreadMemory>;      // threadKey(item) → last stored agreements
+  chatLog: ChatEntry[];                       // last CHAT_LOG_MAX chat texts and say replies, oldest first (src/chat.ts)
 }
 
 export function emptyState(): State {
-  return { cursors: {}, items: {}, nextSeq: 1, msgIndex: {}, watchedThreads: {}, users: {}, channels: {}, feedback: [], threads: {} }
+  return { cursors: {}, items: {}, nextSeq: 1, msgIndex: {}, watchedThreads: {}, users: {}, channels: {}, feedback: [], threads: {}, chatLog: [] }
 }
 
 export class StateStore {
